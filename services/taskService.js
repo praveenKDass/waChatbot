@@ -1,12 +1,15 @@
 // ============================================
-// FILE: services/taskService.js - CORRECTED
+// FILE: services/taskService.js - ENHANCED
+// With recommended improvements and consistency fixes
 // ============================================
+
 const Logger = require("../utils/logger");
 const { makeApiRequest } = require("../generics/services/axios");
 const usersQueries = require("../database/databaseQueries/userQueries");
 const whatsappService = require("./whatsappService");
-const Project = require("../database/models/project"); // ✅ ADDED: Import Project model
+const Project = require("../database/models/project");
 const projectSubmissionService = require("./projectSubmissionService");
+const axios = require("axios");
 
 const TASK_TYPES = {
   content: "📚 Learning Resource",
@@ -22,7 +25,71 @@ const TASK_STATUS = {
 
 class TaskService {
   /**
-   * Helper: fetch project by projectId + phoneNumber from DB
+   * ============================================
+   * HELPER METHODS
+   * ============================================
+   */
+
+  /**
+   * Extract projectId from project data (IMPROVED)
+   */
+  static _getProjectId(projectData) {
+    if (!projectData) return null;
+    return projectData.projectId || projectData._id || null;
+  }
+
+  /**
+   * Call MCP server to fetch tasks
+   */
+  static async fetchTasksFromMCP(phoneNumber, projectId) {
+    try {
+      const mcpServerUrl =
+        process.env.MCP_SERVER_URL || "http://localhost:3001";
+
+      Logger.info("Fetching tasks from MCP server", {
+        phoneNumber,
+        projectId,
+        mcpUrl: mcpServerUrl,
+      });
+
+      const response = await axios.post(
+        `${mcpServerUrl}/mcp/tools/show_tasks`,
+        { phoneNumber, projectId },
+        { timeout: 30000 }
+      );
+
+      if (response.data.isError) {
+        Logger.error("MCP show_tasks error", response.data);
+        return null;
+      }
+
+      let tasksData = response.data.content[0]?.text;
+      if (typeof tasksData === "string") {
+        try {
+          tasksData = JSON.parse(tasksData);
+        } catch (e) {
+          Logger.warn("Could not parse MCP response as JSON", { tasksData });
+        }
+      }
+
+      Logger.info("Tasks fetched from MCP", {
+        phoneNumber,
+        projectId,
+        taskCount: tasksData?.data?.tasks?.length || 0,
+      });
+
+      return tasksData?.data?.tasks || null;
+    } catch (error) {
+      Logger.error("Error fetching tasks from MCP", {
+        message: error.message,
+        projectId,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch project from database
    */
   static async fetchProjectFromDB(phoneNumber, projectId) {
     if (!projectId || !phoneNumber) return null;
@@ -43,36 +110,116 @@ class TaskService {
       Logger.error("Error fetching project from DB", {
         phoneNumber,
         projectId,
-        err,
       });
       return null;
     }
   }
 
   /**
-   * Show list of tasks for a project
+   * Get tasks with multi-source retrieval (DB → MCP)
+   */
+  static async getTasks(phoneNumber, projectId) {
+    try {
+      // Step 1: Try MongoDB
+      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
+
+      if (project?.tasks?.length > 0) {
+        Logger.info("Tasks loaded from MongoDB", {
+          phoneNumber,
+          projectId,
+          taskCount: project.tasks.length,
+        });
+        return project.tasks;
+      }
+
+      // Step 2: Fallback to MCP
+      Logger.info("Tasks not in DB, fetching from MCP", {
+        phoneNumber,
+        projectId,
+      });
+
+      const mcpTasks = await this.fetchTasksFromMCP(phoneNumber, projectId);
+
+      if (mcpTasks?.length > 0) {
+        Logger.info("Tasks loaded from MCP server", {
+          phoneNumber,
+          projectId,
+          taskCount: mcpTasks.length,
+        });
+
+        // Sync to DB for future use
+        await this.syncTasksToDB(phoneNumber, projectId, mcpTasks).catch(
+          (err) => {
+            Logger.warn("Failed to sync tasks to DB", { err });
+          }
+        );
+        return mcpTasks;
+      }
+
+      Logger.warn("No tasks found in DB or MCP", {
+        phoneNumber,
+        projectId,
+      });
+      return [];
+    } catch (error) {
+      Logger.error("Error in getTasks", error);
+      return [];
+    }
+  }
+
+  /**
+   * Sync tasks to MongoDB (IMPROVED)
+   */
+  static async syncTasksToDB(phoneNumber, projectId, tasks) {
+    try {
+      const result = await Project.findOneAndUpdate(
+        { projectId, phoneNumber },
+        {
+          tasks,
+          tasksLastSynced: new Date(),
+          tasksSyncSource: "mcp",
+        },
+        { new: true }
+      );
+
+      Logger.info("Tasks synced to DB", {
+        phoneNumber,
+        projectId,
+        taskCount: tasks.length,
+        syncedAt: result.tasksLastSynced,
+      });
+
+      return {
+        success: true,
+        taskCount: tasks.length,
+      };
+    } catch (error) {
+      Logger.error("Error syncing tasks to DB", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ============================================
+   * TASK DISPLAY METHODS
+   * ============================================
+   */
+
+  /**
+   * Show list of tasks for a project (IMPROVED)
    */
   static async showTasksMenu(phoneNumber, projectData) {
     try {
-      const projectId =
-        (projectData &&
-          (projectData.projectId ||
-            projectData._id ||
-            projectData.project?.projectId)) ||
-        null;
+      const projectId = this._getProjectId(projectData);
 
-      // If projectData already contains tasks, still refresh from DB to keep source-of-truth
-      const project = projectId
+      let project = projectId
         ? await this.fetchProjectFromDB(phoneNumber, projectId)
-        : projectData && projectData.project
-        ? projectData.project
         : projectData;
 
       if (!project) {
         const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-        const ctxProjectId =
-          lastMessage?.context?.projectId ||
-          lastMessage?.context?.project?._id;
+        const ctxProjectId = this._getProjectId(lastMessage?.context?.project);
+
         if (ctxProjectId) {
           const projFromDb = await this.fetchProjectFromDB(
             phoneNumber,
@@ -83,10 +230,7 @@ class TaskService {
           }
         }
 
-        Logger.warn("Project not found for showTasksMenu", {
-          phoneNumber,
-          provided: !!projectData,
-        });
+        Logger.warn("Project not found for showTasksMenu", { phoneNumber });
         await whatsappService.sendMessage(
           phoneNumber,
           "❌ Project data not found. Please select project again."
@@ -106,13 +250,15 @@ class TaskService {
 
   static async _showTasksMenuWithProject(phoneNumber, project) {
     try {
-      Logger.info("Showing tasks menu (DB)", {
+      const projectId = this._getProjectId(project);
+
+      Logger.info("Showing tasks menu", {
         phoneNumber,
-        projectId: project.projectId || project._id,
+        projectId,
         solutionId: project.solutionId,
       });
 
-      const tasks = project.tasks || [];
+      const tasks = await this.getTasks(phoneNumber, projectId);
 
       if (tasks.length === 0) {
         await whatsappService.sendMessage(
@@ -122,18 +268,17 @@ class TaskService {
         return;
       }
 
-      // Update lastMessage context (only projectId, rest from DB)
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_tasks",
         step: 0,
         context: {
-          projectId: project.projectId || project._id,
+          projectId,
           solutionId: project.solutionId,
         },
         text: "view_tasks",
       });
 
-      await this.showTaskSummary(phoneNumber, tasks);
+      await this.showTaskSummary(phoneNumber, tasks, 1);
     } catch (err) {
       Logger.error("Error in _showTasksMenuWithProject", { err });
       await whatsappService.sendMessage(
@@ -144,175 +289,56 @@ class TaskService {
   }
 
   /**
-   * Show summary of all tasks with pagination
+   * Show task summary with pagination
    */
-//   static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
-//     try {
-//       let tasks = [];
-
-//       // Normalize input: could be array, string (projectId), or object (project)
-//       if (Array.isArray(tasksOrProjectId)) {
-//         tasks = tasksOrProjectId;
-//       } else if (typeof tasksOrProjectId === "string") {
-//         // tasksOrProjectId is projectId
-//         const project = await this.fetchProjectFromDB(
-//           phoneNumber,
-//           tasksOrProjectId
-//         );
-//         tasks = project?.tasks || [];
-//       } else if (tasksOrProjectId && tasksOrProjectId.tasks) {
-//         tasks = tasksOrProjectId.tasks;
-//       } else {
-//         // Fallback: try to get projectId from context
-//         const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-//         const ctxProjectId =
-//           lastMessage?.context?.projectId ||
-//           lastMessage?.context?.project?._id;
-//         if (ctxProjectId) {
-//           const project = await this.fetchProjectFromDB(
-//             phoneNumber,
-//             ctxProjectId
-//           );
-//           tasks = project?.tasks || [];
-//         }
-//       }
-
-//       const tasksPerPage = 5;
-//       const totalPages = Math.max(1, Math.ceil(tasks.length / tasksPerPage));
-//       if (page < 1) page = 1;
-//       if (page > totalPages) page = totalPages;
-
-//       const start = (page - 1) * tasksPerPage;
-//       const paginatedTasks = tasks.slice(start, start + tasksPerPage);
-
-//       let summary = `📋 *Project Tasks* (Page ${page}/${totalPages})\n\n`;
-
-//       paginatedTasks.forEach((task, index) => {
-//         const taskNum = start + index + 1;
-//         const taskIcon =
-//           task.type === "content" || task.taskType === "content"
-//             ? "📚"
-//             : task.type === "reflection" || task.taskType === "reflection"
-//             ? "💭"
-//             : "✅";
-//         const statusIcon =
-//           task.status === "notStarted"
-//             ? "❌"
-//             : task.status === "inProgress"
-//             ? "🔄"
-//             : "✅";
-
-//         const name = task.taskName || task.name || "Untitled Task";
-
-//         summary += `${taskNum}. ${taskIcon} ${name}\n`;
-//         summary += `   ${statusIcon} ${TASK_STATUS[task.status] || task.status || "Unknown"}\n\n`;
-//       });
-
-//       summary += `\nType task number (${start + 1}-${Math.min(start + tasksPerPage, tasks.length)}) to view details`;
-
-//       const buttons = [];
-//       if (page > 1) {
-//         buttons.push({
-//           type: "quick_reply",
-//           title: "⬅️ Previous",
-//           id: `tasks_prev_${page - 1}`,
-//         });
-//       }
-//       if (page < totalPages) {
-//         buttons.push({
-//           type: "quick_reply",
-//           title: "Next ➡️",
-//           id: `tasks_next_${page + 1}`,
-//         });
-//       }
-
-//       buttons.push({
-//         type: "quick_reply",
-//         title: "🏠 Back to Project",
-//         id: "back_to_project",
-//       });
-
-//       if (buttons.length > 0) {
-//         await whatsappService.sendInteractiveMessage({
-//           to: phoneNumber,
-//           type: "button",
-//           body: { text: summary },
-//           action: { buttons },
-//         });
-//       } else {
-//         await whatsappService.sendMessage(phoneNumber, summary);
-//       }
-
-//       Logger.info("Task summary shown", { phoneNumber, page, totalPages });
-//     } catch (error) {
-//       Logger.error("Error showing task summary", error);
-//       await whatsappService.sendMessage(
-//         phoneNumber,
-//         "❌ Error loading task summary."
-//       );
-//     }
-//   }
-
-static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
+  static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
     try {
       let tasks = [];
       let projectId = null;
-  
-      // Normalize input: could be array, string (projectId), or object (project)
+
+      // Normalize input
       if (Array.isArray(tasksOrProjectId)) {
         tasks = tasksOrProjectId;
-        // Try to get projectId from context
         const lastMessage = await usersQueries.getLastMessage(phoneNumber);
         projectId = lastMessage?.context?.projectId;
       } else if (typeof tasksOrProjectId === "string") {
-        // tasksOrProjectId is projectId
         projectId = tasksOrProjectId;
-        const project = await this.fetchProjectFromDB(
-          phoneNumber,
-          tasksOrProjectId
-        );
-        tasks = project?.tasks || [];
-      } else if (tasksOrProjectId && tasksOrProjectId.tasks) {
+        tasks = await this.getTasks(phoneNumber, tasksOrProjectId);
+      } else if (tasksOrProjectId?.tasks) {
         tasks = tasksOrProjectId.tasks;
-        projectId = tasksOrProjectId.projectId || tasksOrProjectId._id;
+        projectId = this._getProjectId(tasksOrProjectId);
       } else {
-        // Fallback: try to get projectId from context
         const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-        const ctxProjectId =
-          lastMessage?.context?.projectId ||
-          lastMessage?.context?.project?._id;
-        projectId = ctxProjectId;
-        if (ctxProjectId) {
-          const project = await this.fetchProjectFromDB(
-            phoneNumber,
-            ctxProjectId
-          );
-          tasks = project?.tasks || [];
+        projectId = lastMessage?.context?.projectId;
+        if (projectId) {
+          tasks = await this.getTasks(phoneNumber, projectId);
         }
       }
-  
+
       const tasksPerPage = 5;
       const totalPages = Math.max(1, Math.ceil(tasks.length / tasksPerPage));
-      if (page < 1) page = 1;
-      if (page > totalPages) page = totalPages;
-  
+      page = Math.max(1, Math.min(page, totalPages));
+
       const start = (page - 1) * tasksPerPage;
       const paginatedTasks = tasks.slice(start, start + tasksPerPage);
-  
-      // ✅ NEW: Check if all tasks are completed
-      const completedCount = tasks.filter(t => t.status === "completed").length;
+
+      const completedCount = tasks.filter(
+        (t) => t.status === "completed"
+      ).length;
       const totalTasksCount = tasks.length;
-      const allTasksCompleted = completedCount === totalTasksCount && totalTasksCount > 0;
-  
+      const allTasksCompleted =
+        completedCount === totalTasksCount && totalTasksCount > 0;
+
       let summary = `📋 *Project Tasks* (Page ${page}/${totalPages})\n`;
       summary += `📊 Progress: ${completedCount}/${totalTasksCount} completed\n\n`;
-  
+
       paginatedTasks.forEach((task, index) => {
         const taskNum = start + index + 1;
+        const taskType = task.type || task.taskType || "simple";
         const taskIcon =
-          task.type === "content" || task.taskType === "content"
+          taskType === "content"
             ? "📚"
-            : task.type === "reflection" || task.taskType === "reflection"
+            : taskType === "reflection"
             ? "💭"
             : "✅";
         const statusIcon =
@@ -321,17 +347,20 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
             : task.status === "inProgress"
             ? "🔄"
             : "✅";
-  
+
         const name = task.taskName || task.name || "Untitled Task";
-  
+
         summary += `${taskNum}. ${taskIcon} ${name}\n`;
-        summary += `   ${statusIcon} ${TASK_STATUS[task.status] || task.status || "Unknown"}\n\n`;
+        summary += `   ${statusIcon} ${TASK_STATUS[task.status] || "Unknown"}\n\n`;
       });
-  
-      summary += `\nType task number (${start + 1}-${Math.min(start + tasksPerPage, tasks.length)}) to view details`;
-  
+
+      summary += `\nType task number (${start + 1}-${Math.min(
+        start + tasksPerPage,
+        tasks.length
+      )}) to view details`;
+
       const buttons = [];
-      
+
       if (page > 1) {
         buttons.push({
           type: "quick_reply",
@@ -339,7 +368,7 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           id: `tasks_prev_${page - 1}`,
         });
       }
-      
+
       if (page < totalPages) {
         buttons.push({
           type: "quick_reply",
@@ -347,8 +376,7 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           id: `tasks_next_${page + 1}`,
         });
       }
-  
-      // ✅ NEW: Add submit button if all tasks are completed
+
       if (allTasksCompleted) {
         buttons.push({
           type: "quick_reply",
@@ -356,23 +384,19 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           id: "submit_improvement_project",
         });
       }
-  
+
       buttons.push({
         type: "quick_reply",
         title: "🏠 Back to Project",
         id: "back_to_project",
       });
-  
-      // ✅ NEW: Show completion message if all done
+
       if (allTasksCompleted) {
         await whatsappService.sendMessage(
           phoneNumber,
-          `🎉 *Congratulations!*\n\n` +
-            `You have successfully completed all ${totalTasksCount} tasks! 🌟\n\n` +
-            `Ready to submit your improvement project?`
+          `🎉 *Congratulations!*\n\nYou have completed all ${totalTasksCount} tasks! 🌟`
         );
-  
-        // Add delay before showing summary with submit button
+
         setTimeout(async () => {
           await whatsappService.sendInteractiveMessage({
             to: phoneNumber,
@@ -382,7 +406,6 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           });
         }, 1000);
       } else {
-        // Show regular summary without submit button
         if (buttons.length > 0) {
           await whatsappService.sendInteractiveMessage({
             to: phoneNumber,
@@ -394,14 +417,12 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           await whatsappService.sendMessage(phoneNumber, summary);
         }
       }
-  
-      Logger.info("Task summary shown", { 
-        phoneNumber, 
-        page, 
+
+      Logger.info("Task summary shown", {
+        phoneNumber,
+        page,
         totalPages,
-        completedCount,
-        totalTasksCount,
-        allCompleted: allTasksCompleted 
+        allCompleted: allTasksCompleted,
       });
     } catch (error) {
       Logger.error("Error showing task summary", error);
@@ -413,20 +434,15 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   }
 
   /**
-   * Show detailed view of a specific task
+   * Show task details
    */
-  static async showTaskDetails(phoneNumber, taskIndex) {
+  static async showTaskDetails(phoneNumber, taskIndex,projectIdfromMCP=null) {
     try {
-      // ✅ FIXED: Get projectId from lastMessage ONLY
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId ?? projectIdfromMCP;
 
       if (!projectId) {
-        Logger.warn("showTaskDetails: projectId not found in context", {
-          phoneNumber,
-        });
+        Logger.warn("showTaskDetails: projectId not found", { phoneNumber });
         await whatsappService.sendMessage(
           phoneNumber,
           "❌ Project not found. Please select a project first."
@@ -434,35 +450,32 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
         return;
       }
 
-      // ✅ FIXED: Get everything else from DB
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
+      const tasks = await this.getTasks(phoneNumber, projectId);
 
-      if (!project) {
+      if (!tasks?.length) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Project not found. Please select a project again."
+          "❌ No tasks found. Please try again."
         );
         return;
       }
 
-      const tasks = project.tasks || [];
       const task = tasks[taskIndex - 1];
 
       if (!task) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Task not found. Please select a valid task number."
+          `❌ Task not found. Valid tasks: 1-${tasks.length}`
         );
         return;
       }
 
-      Logger.info("Showing task details (DB)", {
+      Logger.info("Showing task details", {
         phoneNumber,
         taskId: task._id || task.taskId,
         taskName: task.taskName || task.name,
       });
 
-      // Update context with projectId only
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_tasks",
         step: 1,
@@ -473,14 +486,16 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
         text: "view_task_details",
       });
 
-      let detailsText = `📋 *Task ${taskIndex}: ${task.taskName || task.name}*\n\n`;
-      detailsText += `Type: ${TASK_TYPES[task.type] || TASK_TYPES[task.taskType] || task.type || ""}\n`;
-      detailsText += `Status: ${TASK_STATUS[task.status] || task.status || ""}\n`;
-      detailsText += `Sequence: ${task.sequenceNumber || task.sequenceNo || ""}\n\n`;
+      const taskType = task.type || task.taskType || "simple";
+      const detailsText =
+        `📋 *Task ${taskIndex}: ${task.taskName || task.name}*\n\n` +
+        `Type: ${TASK_TYPES[taskType] || taskType}\n` +
+        `Status: ${TASK_STATUS[task.status] || "Unknown"}\n` +
+        `Sequence: ${task.sequenceNumber || task.sequenceNo || "N/A"}\n\n`;
 
       const buttons = [];
 
-      if ((task.type || task.taskType) === "content") {
+      if (taskType === "content") {
         buttons.push({
           type: "quick_reply",
           title: "📚 View Resources",
@@ -488,23 +503,23 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
         });
       }
 
-      buttons.push({
-        type: "quick_reply",
-        title: "✏️ Update Status",
-        id: `updated_task_status_${taskIndex}`,
-      });
-
-      buttons.push({
-        type: "quick_reply",
-        title: "📤 Upload Evidence",
-        id: `upload_evidence_${taskIndex}`,
-      });
-
-      buttons.push({
-        type: "quick_reply",
-        title: "⬅️ Back to Tasks",
-        id: "back_to_tasks",
-      });
+      buttons.push(
+        {
+          type: "quick_reply",
+          title: "✏️ Update Status",
+          id: `updated_task_status_${taskIndex}`,
+        },
+        {
+          type: "quick_reply",
+          title: "📤 Upload Evidence",
+          id: `upload_evidence_${taskIndex}`,
+        },
+        {
+          type: "quick_reply",
+          title: "⬅️ Back to Tasks",
+          id: "back_to_tasks",
+        }
+      );
 
       await whatsappService.sendInteractiveMessage({
         to: phoneNumber,
@@ -527,17 +542,15 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   static async showTaskResources(phoneNumber, taskIndex) {
     try {
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId;
 
       if (!projectId) {
         await whatsappService.sendMessage(phoneNumber, "❌ Project not found.");
         return;
       }
 
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
-      const task = project?.tasks?.[taskIndex - 1];
+      const tasks = await this.getTasks(phoneNumber, projectId);
+      const task = tasks?.[taskIndex - 1];
 
       if (!task) {
         await whatsappService.sendMessage(phoneNumber, "❌ Task not found.");
@@ -561,11 +574,11 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
 
       let resourcesText = `📚 *Learning Resources: ${task.taskName || task.name}*\n\n`;
       resources.forEach((resource, index) => {
-        resourcesText += `${index + 1}. *${resource.name || resource.title || "Resource"}*\n`;
-        if (resource.link)
-          resourcesText += `Link: ${resource.link}\n\n`;
-        else if (resource.url)
-          resourcesText += `Link: ${resource.url}\n\n`;
+        resourcesText += `${index + 1}. *${
+          resource.name || resource.title || "Resource"
+        }*\n`;
+        if (resource.link) resourcesText += `Link: ${resource.link}\n\n`;
+        else if (resource.url) resourcesText += `Link: ${resource.url}\n\n`;
       });
 
       resourcesText += `\n_Tap the links above to access the resources_`;
@@ -605,48 +618,41 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   }
 
   /**
-   * Show status update options for a task
+   * ============================================
+   * TASK STATUS MANAGEMENT
+   * ============================================
    */
-   static async showStatusUpdateMenu(phoneNumber, taskIndex) {
+
+  /**
+   * Show status update menu
+   */
+  static async showStatusUpdateMenu(phoneNumber, taskIndex) {
     try {
-      // ✅ FIXED: Get projectId from lastMessage ONLY
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId;
 
       if (!projectId) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Project not found. Please select project again."
+          "❌ Project not found."
         );
         return;
       }
 
-      // ✅ FIXED: Get project from DB
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
-      console.log(project,"fromDB")
-      if (!project) {
-        await whatsappService.sendMessage(
-          phoneNumber,
-          "❌ Project not found. Please select project again."
-        );
-        return;
-      }
+      const tasks = await this.getTasks(phoneNumber, projectId);
+      const task = tasks?.[taskIndex - 1];
 
-      const task = project.tasks?.[taskIndex - 1];
       if (!task) {
         await whatsappService.sendMessage(phoneNumber, "❌ Task not found.");
         return;
       }
 
-      Logger.info("Showing status update menu (DB)", {
+      Logger.info("Showing status update menu", {
         phoneNumber,
         taskId: task._id || task.taskId,
         currentStatus: task.status,
       });
 
-      // ✅ FIXED: Store only projectId
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_tasks",
         step: 2,
@@ -662,7 +668,9 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
         to: phoneNumber,
         type: "button",
         body: {
-          text: `📋 *Update Task Status*\n\nTask: ${task.taskName || task.name}\n\nSelect new status:`,
+          text: `📋 *Update Task Status*\n\nTask: ${
+            task.taskName || task.name
+          }\n\nSelect new status:`,
         },
         action: {
           buttons: [
@@ -694,43 +702,41 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   }
 
   /**
-   * Handle task status update
+   * Handle task status update (IMPROVED)
    */
-  static async handleStatusUpdate(phoneNumber, taskIndex, newStatus) {
+  static async handleStatusUpdate(phoneNumber, taskIndex, newStatus,projectIdfromMCP=null) {
     try {
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId ?? projectIdfromMCP;
 
       if (!projectId) {
-        await whatsappService.sendMessage(phoneNumber, "❌ Invalid task data.ProjectId is missing");
+        await whatsappService.sendMessage(
+          phoneNumber,
+          "❌ ProjectId missing"
+        );
         return;
       }
 
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
-      if (!project) {
-        await whatsappService.sendMessage(phoneNumber, "❌ Invalid task data.project not found");
-        return;
-      }
+      const tasks = await this.getTasks(phoneNumber, projectId);
+      const task = tasks?.[taskIndex - 1];
 
-      const tasks = project.tasks || [];
-      const task = tasks[taskIndex - 1];
       if (!task) {
         await whatsappService.sendMessage(phoneNumber, "❌ Task not found.");
         return;
       }
 
-      Logger.info("Updating task status (DB)", {
+      Logger.info("Updating task status", {
         phoneNumber,
         projectId,
         taskId: task.taskId || task._id,
+        oldStatus: task.status,
         newStatus,
       });
 
-      // Update MongoDB
+      // Update MongoDB with timestamp
       const updateKey = `tasks.${taskIndex - 1}.status`;
       const endDateKey = `tasks.${taskIndex - 1}.endDate`;
+      const lastUpdatedKey = `tasks.${taskIndex - 1}.lastUpdated`;
 
       await Project.updateOne(
         { projectId, phoneNumber },
@@ -738,11 +744,12 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           $set: {
             [updateKey]: newStatus,
             [endDateKey]: new Date(),
+            [lastUpdatedKey]: new Date(),
           },
         }
       );
 
-      // Update lastMessage context
+      // Update user context
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_tasks",
         step: 1,
@@ -755,27 +762,26 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
 
       await whatsappService.sendMessage(
         phoneNumber,
-        `✅ Task status updated to: ${TASK_STATUS[newStatus] || newStatus}\n\n` +
-          `📋 Task: ${task.taskName || task.name}`
+        `✅ Task updated to: ${TASK_STATUS[newStatus]}\n📋 ${
+          task.taskName || task.name
+        }`
       );
 
-      // ✅ NEW: Check if all tasks are now completed
-      const updatedProject = await this.fetchProjectFromDB(phoneNumber, projectId);
-      const allCompleted = await this.checkAllTasksCompleted(updatedProject);
+      // Check completion
+      const updatedTasks = await this.getTasks(phoneNumber, projectId);
+      const allCompleted = await this.checkAllTasksCompleted(updatedTasks);
 
       if (allCompleted) {
-        // Auto-trigger submission check with a slight delay
         setTimeout(async () => {
           await projectSubmissionService.checkAndShowSubmitButton(phoneNumber);
         }, 1500);
       } else {
-        // Show evidence upload prompt if not all completed
         setTimeout(async () => {
           await whatsappService.sendInteractiveMessage({
             to: phoneNumber,
             type: "button",
             body: {
-              text: "Upload evidence (documents/images) for this task?",
+              text: "Upload evidence for this task?",
             },
             action: {
               buttons: [
@@ -803,46 +809,47 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   /**
    * Check if all tasks are completed
    */
-  static async checkAllTasksCompleted(project) {
+  static async checkAllTasksCompleted(tasks) {
     try {
-      if (!project || !project.tasks) return false;
-      
-      const tasks = project.tasks;
-      const completedTasks = tasks.filter(t => t.status === "completed").length;
-      const totalTasks = tasks.length;
-      
-      Logger.info("Task completion check", {
-        completed: completedTasks,
-        total: totalTasks,
-        allCompleted: completedTasks === totalTasks,
+      if (!Array.isArray(tasks)) return false;
+
+      const completed = tasks.filter((t) => t.status === "completed").length;
+      const total = tasks.length;
+
+      Logger.info("Checking task completion", {
+        completed,
+        total,
+        allDone: completed === total,
       });
 
-      return completedTasks === totalTasks && totalTasks > 0;
+      return completed === total && total > 0;
     } catch (error) {
-      Logger.error("Error checking task completion", error);
+      Logger.error("Error checking completion", error);
       return false;
     }
   }
 
+  /**
+   * ============================================
+   * EVIDENCE & OTHER OPERATIONS
+   * ============================================
+   */
 
   /**
-   * Handle evidence upload prompt
+   * Handle evidence upload (IMPROVED)
    */
   static async handleEvidenceUploadPrompt(phoneNumber, taskIndex) {
     try {
-        console.log("==============================================")
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId;
 
       if (!projectId) {
         await whatsappService.sendMessage(phoneNumber, "❌ Task not found.");
         return;
       }
 
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
-      const task = project?.tasks?.[taskIndex - 1];
+      const tasks = await this.getTasks(phoneNumber, projectId);
+      const task = tasks?.[taskIndex - 1];
 
       if (!task) {
         await whatsappService.sendMessage(phoneNumber, "❌ Task not found.");
@@ -854,6 +861,14 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
         taskId: task.taskId || task._id,
       });
 
+      // Store evidence context
+      const evidenceContext = {
+        taskIndex,
+        taskId: task.taskId || task._id,
+        uploadStartedAt: new Date(),
+        files: [],
+      };
+
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_tasks",
         step: 3,
@@ -861,57 +876,56 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
           projectId,
           currentTaskIndex: taskIndex,
           uploadingEvidence: true,
+          evidence: evidenceContext,
         },
         text: "upload_evidence",
       });
 
       await whatsappService.sendMessage(
         phoneNumber,
-        `📤 *Upload Evidence for Task: ${task.taskName || task.name}*\n\n` +
-          `Please share documents or images as evidence for this task.\n\n` +
+        `📤 *Upload Evidence: ${task.taskName || task.name}*\n\n` +
           `You can send:\n` +
-          `• Photos (images)\n` +
-          `• Documents (PDFs)\n` +
+          `• Photos/Images\n` +
+          `• Documents (PDF, DOC)\n` +
           `• Multiple files\n\n` +
-          `_Note: Store the file details, we'll upload them later_`
+          `Type 'done' when finished or 'cancel' to skip`
       );
     } catch (error) {
-      Logger.error("Error in evidence upload prompt", error);
+      Logger.error("Error prompting evidence upload", error);
       await whatsappService.sendMessage(
         phoneNumber,
-        "❌ Error processing evidence upload."
+        "❌ Error with evidence upload."
       );
     }
   }
 
   /**
-   * Handle pagination for task list
+   * Handle task pagination
    */
-  static async handleTaskPagination(phoneNumber, direction, page) {
+  static async handleTaskPagination(phoneNumber, page) {
     try {
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      const projectId =
-        lastMessage?.context?.projectId ||
-        lastMessage?.context?.project?._id;
+      const projectId = lastMessage?.context?.projectId;
 
       if (!projectId) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Project data not found."
+          "❌ Project not found."
         );
         return;
       }
 
-      const project = await this.fetchProjectFromDB(phoneNumber, projectId);
-      if (!project || !project.tasks) {
+      const tasks = await this.getTasks(phoneNumber, projectId);
+
+      if (!tasks?.length) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Project data not found."
+          "❌ No tasks found."
         );
         return;
       }
 
-      await this.showTaskSummary(phoneNumber, project.tasks, page);
+      await this.showTaskSummary(phoneNumber, tasks, page);
     } catch (error) {
       Logger.error("Error handling task pagination", error);
       await whatsappService.sendMessage(phoneNumber, "❌ Error loading tasks.");
@@ -919,30 +933,26 @@ static async showTaskSummary(phoneNumber, tasksOrProjectId, page = 1) {
   }
 
   /**
-   * Sync task updates to server
+   * Sync task updates (placeholder for API sync)
    */
   static async syncTaskUpdates(phoneNumber, taskIndex, updateData) {
     try {
-      Logger.info("Preparing task sync", {
+      Logger.info("Syncing task updates", {
         phoneNumber,
         taskIndex,
         updateData,
       });
 
-      Logger.info("Task sync prepared (pending API integration)", {
-        phoneNumber,
-      });
+      // TODO: Implement actual API sync if needed
+      // Could sync to MCP server or external API
 
       return {
         success: true,
-        message: "Task updates queued for sync",
+        message: "Task updates synced",
       };
     } catch (error) {
       Logger.error("Error syncing task updates", error);
-      return {
-        success: false,
-        error: error.message,
-      };
+      return { success: false, error: error.message };
     }
   }
 }

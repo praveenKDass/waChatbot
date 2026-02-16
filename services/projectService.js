@@ -1,6 +1,8 @@
 // ============================================
-// FILE: services/projectService.js
+// FILE: services/projectService.js - COMPLETE
+// With multi-source data retrieval + all existing functions
 // ============================================
+
 const whatsappService = require("./whatsappService");
 const usersQueries = require("../database/databaseQueries/userQueries");
 const Logger = require("../utils/logger");
@@ -8,30 +10,189 @@ const config = require("../config/config");
 const { makeApiRequest } = require("../generics/services/axios");
 const Project = require("../database/models/project");
 const taskService = require("./taskService");
+const _ = require('lodash');
 class ProjectService {
   constructor() {
     this.apiBaseUrl = config.backend.apiUrl;
   }
 
-  getHeaders() {
-    return {
-      "content-type": "application/json",
-      "x-auth-token":
-        process.env.ELEVATE_AUTH_TOKEN ||
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoyODU1LCJuYW1lIjoic2dmdW5jdGlvbmFyaWVzIHNnb2ZmaWNpYWwiLCJzZXNzaW9uX2lkIjoyMjM1NSwib3JnYW5pemF0aW9uX2lkcyI6WyIzOSJdLCJvcmdhbml6YXRpb25fY29kZXMiOlsidHJpcHVyYSJdLCJ0ZW5hbnRfY29kZSI6InNoaWtzaGFncmFoYW5ldyIsIm9yZ2FuaXphdGlvbnMiOlt7ImlkIjozOSwibmFtZSI6IlRyaXB1cmEiLCJjb2RlIjoidHJpcHVyYSIsImRlc2NyaXB0aW9uIjoidHJpcHVyYSBzdGF0ZSBhcyBhbiBvcmdhbml6YXRpb24gdGVzdCBpbiBTRyIsInN0YXR1cyI6IkFDVElWRSIsInJlbGF0ZWRfb3JncyI6W10sInRlbmFudF9jb2RlIjoic2hpa3NoYWdyYWhhbmV3IiwibWV0YSI6bnVsbCwiY3JlYXRlZF9ieSI6MSwidXBkYXRlZF9ieSI6Mzc3LCJyb2xlcyI6W3siaWQiOjc3LCJ0aXRsZSI6Im1lbnRlZSIsImxhYmVsIjoibWVudGVlIiwidXNlcl90eXBlIjowLCJzdGF0dXMiOiJBQ1RJVkUiLCJvcmdhbml6YXRpb25faWQiOjM1LCJ2aXNpYmlsaXR5IjoiUFVCTElDIiwidGVuYW50X2NvZGUiOiJzaGlrc2hhZ3JhaGFuZXciLCJ0cmFuc2xhdGlvbnMiOm51bGx9XX1dfSwiaWF0IjoxNzYyODQ2NjI3LCJleHAiOjE3NjI5MzMwMjd9.njm8kuA676wnDyVoJ1l9HxrOHECG_fiaj9fVKo6IHJw",
-      origin: this.apiBaseUrl,
-    };
+  /**
+   * ============================================
+   * MULTI-SOURCE DATA RETRIEVAL METHODS
+   * ============================================
+   */
+
+  /**
+   * Get project data from multiple sources
+   * Priority: 1. MongoDB → 2. Backend API → 3. Solution-based
+   */
+  async getProjectData(phoneNumber, projectId, solutionId = null) {
+    try {
+      Logger.info("Getting project data from multiple sources", {
+        phoneNumber,
+        projectId,
+        solutionId,
+      });
+
+      // Step 1: Try MongoDB first
+      const dbProject = await Project.findOne(
+        { phoneNumber, projectId },
+        {
+          projectId: 1,
+          projectName: 1,
+          solutionId: 1,
+          description: 1,
+          status: 1,
+          duration: 1,
+          tasks: 1,
+          projectData: 1,
+        }
+      ).lean();
+
+      if (dbProject) {
+        Logger.info("Project found in MongoDB", {
+          phoneNumber,
+          projectId,
+          source: "db",
+        });
+        return {
+          source: "db",
+          project: dbProject,
+          projectId: dbProject.projectId,
+          solutionId: dbProject.solutionId,
+          projectType: "solutionWithProject",
+        };
+      }
+
+      // Step 2: Try backend API
+      if (projectId) {
+        const apiProject = await this.fetchProjectFromAPI(projectId);
+        if (apiProject) {
+          Logger.info("Project found in backend API", {
+            phoneNumber,
+            projectId,
+            source: "api",
+          });
+          await this.syncProjectToDB(apiProject, phoneNumber, 1).catch(
+            (err) => {
+              Logger.warn("Failed to sync project to DB", { err });
+            }
+          );
+          return {
+            source: "api",
+            project: apiProject,
+            projectId: apiProject._id || projectId,
+            solutionId: apiProject.solutionId,
+            projectType: "solutionWithProject",
+          };
+        }
+      }
+
+      // Step 3: Try solution-based approach
+      if (solutionId) {
+        const apiSolution = await this.fetchSolutionFromAPI(solutionId);
+        if (apiSolution) {
+          Logger.info("Solution found in backend API", {
+            phoneNumber,
+            solutionId,
+            source: "api_solution",
+          });
+          return {
+            source: "api_solution",
+            project: apiSolution,
+            projectId: null,
+            solutionId: apiSolution._id || solutionId,
+            projectType: "solutionWithoutProject",
+          };
+        }
+      }
+
+      return null;
+    } catch (error) {
+      Logger.error("Error getting project data from multiple sources", error);
+      return null;
+    }
   }
 
   /**
-   * Start new project creation flow
+   * Fetch project from API
    */
+  async fetchProjectFromAPI(projectId) {
+    try {
+      if (!projectId) return null;
+
+      const url = `${this.apiBaseUrl}/project/v1/userProjects/details/${projectId}`;
+      const response = await makeApiRequest(
+        "POST",
+        url,
+        process.env.ELEVATE_AUTH_TOKEN,
+        {
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
+          professional_subroles:
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb",
+          organizations: "[object Object]",
+        }
+      );
+
+      return response?.data?.result || response?.data || null;
+    } catch (error) {
+      Logger.error("Error fetching project from API", {
+        projectId,
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch solution from API
+   */
+  async fetchSolutionFromAPI(solutionId) {
+    try {
+      if (!solutionId) return null;
+
+      const url = `${this.apiBaseUrl}/project/v1/solutions/details/${solutionId}`;
+      const response = await makeApiRequest(
+        "POST",
+        url,
+        process.env.ELEVATE_AUTH_TOKEN,
+        {
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
+          professional_subroles:
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb",
+          organizations: "[object Object]",
+        }
+      );
+
+      return response?.data?.result || response?.data || null;
+    } catch (error) {
+      Logger.error("Error fetching solution from API", {
+        solutionId,
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * ============================================
+   * PROJECT MANAGEMENT FLOWS
+   * ============================================
+   */
+
   async startNewProjectFlow(phoneNumber) {
     try {
-      // Set flow state
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_creation",
-        step: 1, // Ask for project name
+        step: 1,
         context: {},
         text: "start_new_project",
       });
@@ -50,17 +211,11 @@ class ProjectService {
     }
   }
 
-  /**
-   * Handle project browsing flow (when user selects a project number)
-   */
   async handleProjectBrowseFlow(phoneNumber, messageText, lastMessage) {
     try {
       const step = lastMessage.step || 1;
       const context = lastMessage.context || {};
 
-      Logger.info("Project browse flow", { phoneNumber, step, messageText });
-
-      // User typed a project number
       if (step === 1 && /^\d+$/.test(messageText.trim())) {
         const projectNumber = parseInt(messageText.trim());
         const projectKey = `project_${projectNumber}`;
@@ -76,12 +231,12 @@ class ProjectService {
           return;
         }
 
-        // Fetch project details
-        await this.showProjectDetails(phoneNumber, projectId);
+        await this.showProjectDetails(phoneNumber, {
+          reply: { list_reply: { id: projectId } },
+        });
         return;
       }
 
-      // If unrecognized input, prompt again
       await whatsappService.sendMessage(
         phoneNumber,
         "Please enter a valid project number or use the navigation buttons."
@@ -93,18 +248,11 @@ class ProjectService {
     }
   }
 
-  /**
-   * Show detailed view of a single project
-   */
-
   async showProjectDetails(phoneNumber, message) {
     try {
       let projectId, solutionId, projectType;
 
-      // Extract the full selectedId from the message
-      // Format: "ListV3:solutionWithProject_<id>" or "ListV3:solutionWithoutProject_<id>"
       let selectedId;
-      console.log(message, "this is message");
       if (message.reply?.list_reply?.id) {
         selectedId = message.reply.list_reply.id;
       } else if (message.interactive?.list_reply?.id) {
@@ -112,9 +260,6 @@ class ProjectService {
       }
 
       if (!selectedId) {
-        Logger.warn("Invalid project selection - no selectedId found", {
-          phoneNumber,
-        });
         await whatsappService.sendMessage(
           phoneNumber,
           `❌ Invalid project selection. Please try again.`
@@ -123,95 +268,28 @@ class ProjectService {
         return;
       }
 
-      // Remove "ListV3:" prefix if present
       const cleanId = selectedId.replace(/^ListV3:/, "");
+      const [type, id] = cleanId.split("_");
 
-      // Retrieve project data from the stored project mapping
-      // const lastMessage = await usersQueries.getLastMessage(phoneNumber);
-      // const projectMap = lastMessage?.context?.projectMap || {};
-      // console.log(projectMap,"this is map")
-      // const projectData = projectMap[cleanId];
-
-      // if (!projectData) {
-      //   Logger.warn("Project data not found in map", {
-      //     phoneNumber,
-      //     cleanId,
-      //     mapKeys: Object.keys(projectMap),
-      //   });
-      //   await whatsappService.sendMessage(
-      //     phoneNumber,
-      //     `❌ Invalid project selection. Please try again.`
-      //   );
-      //   await this.listProjects(phoneNumber, 1);
-      //   return;
-      // }
-      if (selectedId) {
-        // Remove prefix like "ListV3:" if present
-        const cleanedId = selectedId.replace(/^ListV3:/, "");
-
-        // Split type and id
-        const [type, id] = cleanedId.split("_");
-
-        projectType = type;
-
-        if (projectType === "solutionWithProject") {
-          projectId = id;
-        } else if (projectType === "solutionWithoutProject") {
-          solutionId = id;
-        } else {
-          console.warn("Unknown project type:", projectType);
-        }
-      }
-
-      // projectId = projectData.projectId;
-      // solutionId = projectData.solutionId;
-      // projectType = projectData.type; // "solutionWithProject" or "solutionWithoutProject"
+      projectType = type;
+      projectId = projectType === "solutionWithProject" ? id : null;
+      solutionId = projectType === "solutionWithoutProject" ? id : null;
 
       Logger.info("Project selected", {
         phoneNumber,
         projectId,
         solutionId,
         projectType,
-        cleanId,
       });
 
-      Logger.info("Fetching project details", {
+      // Get project data from multiple sources
+      const projectDataResult = await this.getProjectData(
         phoneNumber,
         projectId,
-        solutionId,
-        projectType,
-      });
-
-      // Determine endpoint based on project type
-      let url;
-      if (projectType === "solutionWithProject") {
-        url = `${this.apiBaseUrl}/project/v1/userProjects/details/${projectId}`;
-      } else if (projectType === "solutionWithoutProject") {
-        url = `${this.apiBaseUrl}/project/v1/solutions/details/${solutionId}`;
-      } else {
-        throw new Error(`Unknown project type: ${projectType}`);
-      }
-
-      Logger.info("API endpoint determined", { projectType, url });
-
-      const response = await makeApiRequest(
-        "POST",
-        url,
-        process.env.ELEVATE_AUTH_TOKEN,
-        {
-          state: "6863a9941d52e30014093ad9",
-          district: "6863aa5f1d52e30014093b48",
-          block: "6863aaad1d52e30014093b8e",
-          cluster: "6863ab011d52e30014093d27",
-          school: "68650f6f633ad100153fdb4c",
-          professional_role: "6867add70d8d24001465c3e4",
-          professional_subroles:
-            "6867b0530d8d24001465c409,6867b0530d8d24001465c40b,6867b0530d8d24001465c40d,6867b0530d8d24001465c40f,6867b0530d8d24001465c411,6867b0530d8d24001465c413,6867b0530d8d24001465c415,6867b0530d8d24001465c417,6867b0530d8d24001465c419,6867b0530d8d24001465c41b,6867b0530d8d24001465c41d,6867b0530d8d24001465c41f,6867b0530d8d24001465c421,6867b0530d8d24001465c423,6867b0530d8d24001465c425,6867b0530d8d24001465c427,6867b0530d8d24001465c429,6867b0530d8d24001465c42b,6867b0530d8d24001465c42d,6867b0530d8d24001465c42f,6867b0530d8d24001465c431,6867b0530d8d24001465c433,6867b0530d8d24001465c435,6867b0530d8d24001465c437,6867b0530d8d24001465c439,6867b0530d8d24001465c43b,6867b0530d8d24001465c43d,6867b0530d8d24001465c43f,6867b0530d8d24001465c441,6867b0530d8d24001465c443,6867b0530d8d24001465c445,6867b0530d8d24001465c447,6867b0530d8d24001465c449,6867b0530d8d24001465c44b",
-          organizations: "[object Object]",
-        }
+        solutionId
       );
 
-      const project = response?.data?.result || response?.data;
+      const project = projectDataResult?.project;
 
       if (!project) {
         await whatsappService.sendMessage(
@@ -219,209 +297,40 @@ class ProjectService {
           "❌ Failed to load project details. Please try again."
         );
         await this.listProjects(phoneNumber, 1);
-        await usersQueries.clearLastMessage(phoneNumber);
         return;
       }
 
-      // Update flow state to project detail view
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_detail",
         step: 0,
-        context: { projectId, solutionId, project },
-        text: `view_project_${projectId}`,
+        context: {
+          projectId,
+          solutionId,
+          project,
+          projectType: projectDataResult?.projectType || projectType,
+        },
+        text: `view_project_${projectId || solutionId}`,
       });
 
-      console.log(project, "this is project");
+      await this.showProjectDetailsFromData(
+        phoneNumber,
+        project,
+        projectType,
+        projectId,
+        solutionId
+      );
 
-      // Format project details message
-      const detailsText =
-        `*📁 ${project.title ?? project.name}*\n\n` +
-        `${project.description ? `${project.description}\n\n` : ""}` +
-        `*Duration:* ${project.duration || "N/A"}\n` +
-        `*Status:* ${project.status || "Unknown"}\n` +
-        `\nWhat would you like to do?`;
-
-      // await whatsappService.sendInteractiveMessage({
-      //   to: phoneNumber,
-      //   type: "button",
-      //   header: {
-      //     text: "Project Details",
-      //   },
-      //   body: {
-      //     text: detailsText,
-      //   },
-      //   footer: {
-      //     text: "Powered by ShikshaLokam",
-      //   },
-      //   action: {
-      //     buttons: [
-      //       {
-      //         type: "quick_reply",
-      //         title: "Update_Task",
-      //         id: "update_task",
-      //       },
-      //       {
-      //         type: "quick_reply",
-      //         title: "⬅️ Back to List",
-      //         id: "back_to_list",
-      //       },
-      //       {
-      //         type: "quick_reply",
-      //         title: "🏠 Main Menu",
-      //         id: "main_menu",
-      //       },
-      //     ],
-      //   },
-      // });
-
-      if (projectType === "solutionWithoutProject") {
-        await whatsappService.sendInteractiveMessage({
-          to: phoneNumber,
-          type: "button",
-          header: {
-            text: "Project Details",
-          },
-          body: {
-            text: detailsText,
-          },
-          footer: {
-            text: "Powered by ShikshaLokam",
-          },
-          action: {
-            buttons: [
-              {
-                type: "quick_reply",
-                title: "🚀 Start Improvement Project",
-                id: `start_improvement_${projectId}`,
-              },
-              {
-                type: "quick_reply",
-                title: "⬅️ Back to List",
-                id: "back_to_list",
-              },
-              {
-                type: "quick_reply",
-                title: "🏠 Main Menu",
-                id: "main_menu",
-              },
-            ],
-          },
-        });
-      } else {
-        await this.syncProjectToDB(project, phoneNumber, 1);
-        // For solutionWithProject, show normal buttons with task viewing
-        // await whatsappService.sendInteractiveMessage({
-        //   to: phoneNumber,
-        //   type: "button",
-        //   header: {
-        //     text: "Project Details",
-        //   },
-        //   body: {
-        //     text: detailsText,
-        //   },
-        //   footer: {
-        //     text: "Powered by ShikshaLokam",
-        //   },
-        //   action: {
-        //     buttons: [
-        //       {
-        //         type: "quick_reply",
-        //         title: "📋 View Tasks",
-        //         id: `view_tasks_${projectId}`,
-        //       },
-        //       {
-        //         type: "quick_reply",
-        //         title: "✏️ Update Task",
-        //         id: `update_task_${projectId}`,
-        //       },
-        //       {
-        //         type: "quick_reply",
-        //         title: "⬅️ Back to List",
-        //         id: "back_to_list",
-        //       },
-        //     ],
-        //   },
-        // });
-        const projectStatus = project.status?.toLowerCase();
-
-        // Build buttons based on project status
-        const buttons = [];
-
-        // For active/in-progress projects
-        if (projectStatus !== "submitted" && projectStatus !== "completed") {
-          buttons.push(
-            {
-              type: "quick_reply",
-              title: "📋 View Tasks",
-              id: `view_tasks_${projectId}`,
-            },
-            {
-              type: "quick_reply",
-              title: "✏️ Update Task",
-              id: `update_task_${projectId}`,
-            }
-          );
-        }
-
-        // For submitted projects - show report button
-        if (projectStatus === "submitted") {
-          buttons.push({
-            type: "quick_reply",
-            title: "📊 View Report",
-            id: `view_report_${projectId}`,
-          });
-        }
-
-        // For completed projects - show both report and certificate
-        if (projectStatus === "completed") {
-          buttons.push(
-            {
-              type: "quick_reply",
-              title: "📊 View Report",
-              id: `view_report_${projectId}`,
-            },
-            {
-              type: "quick_reply",
-              title: "🏆 View Certificate",
-              id: `view_certificate_${projectId}`,
-            }
-          );
-        }
-
-        // Always add back button
-        buttons.push({
-          type: "quick_reply",
-          title: "⬅️ Back to List",
-          id: "back_to_list",
-        });
-
-        // Limit to 3 buttons max for WhatsApp
-        const displayButtons = buttons.slice(0, 3);
-
-        await whatsappService.sendInteractiveMessage({
-          to: phoneNumber,
-          type: "button",
-          header: { text: "Project Details" },
-          body: { text: detailsText },
-          footer: { text: "Powered by ShikshaLokam" },
-          action: { buttons: displayButtons },
-        });
-      }
       Logger.info("Project details shown", { phoneNumber, projectId });
     } catch (error) {
       Logger.error("Error showing project details", error);
-
       await whatsappService.sendMessage(
         phoneNumber,
         "❌ Something went wrong. Showing your projects again..."
       );
-
       await this.listProjects(phoneNumber, 1);
-      await usersQueries.clearLastMessage(phoneNumber);
     }
   }
 
-  // Helper method to handle back to list action
   async handleBackToList(phoneNumber) {
     try {
       await usersQueries.clearLastMessage(phoneNumber);
@@ -435,27 +344,20 @@ class ProjectService {
     }
   }
 
-  /**
-   * Handle project creation flow steps
-   */
   async handleProjectCreationFlow(phoneNumber, messageText, lastMessage) {
     try {
       const step = lastMessage.step || 1;
       const context = lastMessage.context || {};
 
-      Logger.info("Project creation flow", { phoneNumber, step, messageText });
-
       switch (step) {
-        case 1: // Received project name
+        case 1:
           context.projectName = messageText.trim();
-
           await usersQueries.updateLastMessage(phoneNumber, {
             flow: "project_creation",
-            step: 2, // Ask for description
+            step: 2,
             context,
             text: messageText,
           });
-
           await whatsappService.sendMessage(
             phoneNumber,
             `✅ Great! Project name: *${context.projectName}*\n\n` +
@@ -463,45 +365,36 @@ class ProjectService {
           );
           break;
 
-        case 2: // Received description
+        case 2:
           context.projectDescription = messageText.trim();
-
           await usersQueries.updateLastMessage(phoneNumber, {
             flow: "project_creation",
-            step: 3, // Ask for start date
+            step: 3,
             context,
             text: messageText,
           });
-
           await whatsappService.sendMessage(
             phoneNumber,
             "📅 When does the project start?\n\n" +
-              "Please provide the date in format: *DD/MM/YYYY*\n" +
-              "Example: 15/12/2024"
+              "Please provide the date in format: *DD/MM/YYYY*"
           );
           break;
 
-        case 3: // Received start date
-          // Validate date format
+        case 3:
           if (!/^\d{2}\/\d{2}\/\d{4}$/.test(messageText)) {
             await whatsappService.sendMessage(
               phoneNumber,
-              "❌ Invalid date format. Please use *DD/MM/YYYY*\n" +
-                "Example: 15/12/2024"
+              "❌ Invalid date format. Please use *DD/MM/YYYY*"
             );
             return;
           }
-
           context.startDate = messageText.trim();
-
           await usersQueries.updateLastMessage(phoneNumber, {
             flow: "project_creation",
-            step: 4, // Confirmation
+            step: 4,
             context,
             text: messageText,
           });
-
-          // Show confirmation
           await whatsappService.sendInteractiveMessage({
             to: phoneNumber,
             type: "button",
@@ -529,7 +422,6 @@ class ProjectService {
           break;
 
         default:
-          Logger.warn("Unknown project creation step", { step });
           await usersQueries.clearLastMessage(phoneNumber);
           break;
       }
@@ -540,35 +432,27 @@ class ProjectService {
     }
   }
 
-  /**
-   * List user's projects with pagination
-   */
-  /**
-   * List user's projects with pagination
-   */
   async listProjects(phoneNumber, page = 1) {
     try {
       const url = `${this.apiBaseUrl}/project/v1/solutions/targetedSolutions?type=improvementProject&page=1&limit=30&filter=assignedToMe`;
+
       const response = await makeApiRequest(
         "POST",
         url,
-        process.env.ELEVATE_AUTH_TOKEN ??
-          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoxNzU4LCJuYW1lIjoic2wgZWxlZm8iLCJzZXNzaW9uX2lkIjoyMjYzNiwib3JnYW5pemF0aW9uX2lkcyI6WyIzMyJdLCJvcmdhbml6YXRpb25fY29kZXMiOlsidGFuOTAiXSwidGVuYW50X2NvZGUiOiJzaGlrc2hhbG9rYW0iLCJvcmdhbml6YXRpb25zIjpbeyJpZCI6MzMsIm5hbWUiOiJ0YW45MCIsImNvZGUiOiJ0YW45MCIsImRlc2NyaXB0aW9uIjoiVGFuOTAgc3BlY2lhbGl6ZXMgaW4gcHJvdmlkaW5nIGVkdWNhdGlvbmFsIFNURUFNIiwic3RhdHVzIjoiQUNUSVZFIiwicmVsYXRlZF9vcmdzIjpbMzRdLCJ0ZW5hbnRfY29kZSI6InNoaWtzaGFsb2thbSIsIm1ldGEiOm51bGwsImNyZWF0ZWRfYnkiOjEsInVwZGF0ZWRfYnkiOjE3MDksInJvbGVzIjpbeyJpZCI6MjMsInRpdGxlIjoibWVudGVlIiwibGFiZWwiOiJtZW50ZWUiLCJ1c2VyX3R5cGUiOjAsInN0YXR1cyI6IkFDVElWRSIsIm9yZ2FuaXphdGlvbl9pZCI6MTAsInZpc2liaWxpdHkiOiJQVUJMSUMiLCJ0ZW5hbnRfY29kZSI6InNoaWtzaGFsb2thbSIsInRyYW5zbGF0aW9ucyI6bnVsbH1dfV19LCJpYXQiOjE3NjMwMjEyMjcsImV4cCI6MTc2MzEwNzYyN30.sn2EVlhcpfEJOnbnOOjGSmKjzNFCsN0MEqgE8z2MSoI",
-          {
-            state: "6863a9941d52e30014093ad9",
-            district: "6863aa5f1d52e30014093b48",
-            block: "6863aaad1d52e30014093b8e",
-            cluster: "6863ab011d52e30014093d27",
-            school: "68650f6f633ad100153fdb4c",
-            professional_role: "6867add70d8d24001465c3e4",
-            professional_subroles:
-              "6867b0530d8d24001465c409,6867b0530d8d24001465c40b,6867b0530d8d24001465c40d,6867b0530d8d24001465c40f,6867b0530d8d24001465c411,6867b0530d8d24001465c413,6867b0530d8d24001465c415,6867b0530d8d24001465c417,6867b0530d8d24001465c419,6867b0530d8d24001465c41b,6867b0530d8d24001465c41d,6867b0530d8d24001465c41f,6867b0530d8d24001465c421,6867b0530d8d24001465c423,6867b0530d8d24001465c425,6867b0530d8d24001465c427,6867b0530d8d24001465c429,6867b0530d8d24001465c42b,6867b0530d8d24001465c42d,6867b0530d8d24001465c42f,6867b0530d8d24001465c431,6867b0530d8d24001465c433,6867b0530d8d24001465c435,6867b0530d8d24001465c437,6867b0530d8d24001465c439,6867b0530d8d24001465c43b,6867b0530d8d24001465c43d,6867b0530d8d24001465c43f,6867b0530d8d24001465c441,6867b0530d8d24001465c443,6867b0530d8d24001465c445,6867b0530d8d24001465c447,6867b0530d8d24001465c449,6867b0530d8d24001465c44b",
-            organizations: "[object Object]",
-          }
+        process.env.ELEVATE_AUTH_TOKEN,
+        {
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
+          professional_subroles:
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb,6825ad1f97b5680013e844fe,6825ad1f97b5680013e84500",
+          organizations: "[object Object]",
+        }
       );
 
-      const projects = response?.data?.result?.data;
-      console.log("this is projects", projects);
+      const projects = response?.data?.result?.data || [];
       const itemsPerPage = 10;
       const totalPages = Math.ceil(projects.length / itemsPerPage);
       const start = (page - 1) * itemsPerPage;
@@ -577,102 +461,49 @@ class ProjectService {
       if (paginatedProjects.length === 0) {
         await whatsappService.sendMessage(
           phoneNumber,
-          "📂 You don't have any projects yet.\n\n" +
-            "Would you like to create one?"
+          "📂 You don't have any projects yet."
         );
         await usersQueries.clearLastMessage(phoneNumber);
         return;
       }
 
-      // Create a mapping of projectId to full project data (including solutionId)
-      const projectMap = {};
       const listItems = paginatedProjects.map((project) => {
-        // Determine if this is a project with solution or solution without project
         const hasProjectId = project?._id && project._id.trim() !== "";
         const projectId = hasProjectId ? project._id : project?.solutionId;
-
-        // Determine the type for endpoint routing
         const type = hasProjectId
           ? "solutionWithProject"
           : "solutionWithoutProject";
 
-        // Store the full project data for later retrieval
-        projectMap[`${type}_${projectId}`] = {
-          projectId: project._id,
-          solutionId: project.solutionId,
-          name: project.name,
-          description: project.description,
-          type, // Store type for routing
-        };
-
         return {
           id: `${type}_${projectId}`,
           title: project.name,
-          description: `Status: ${project.description}`,
+          description: `Status: ${project.status || "N/A"}`,
         };
       });
-      console.log(projectMap, "this is mapin listing");
-      // Set flow state with project mapping stored in context
+
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_browse",
         step: 1,
-        // context: {
-        //   page,
-        //   action: "list",
-        //   totalPages,
-        //   projectMap, // Store the entire project mapping
-        // },
         text: "list_projects",
       });
 
-      // Add pagination buttons if needed
-      const buttons = [];
-      if (page > 1) {
-        buttons.push({
-          type: "reply",
-          reply: { id: `prev_page_${page - 1}`, title: "⬅️ Previous" },
-        });
-      }
-      if (page < totalPages) {
-        buttons.push({
-          type: "reply",
-          reply: { id: `next_page_${page + 1}`, title: "Next ➡️" },
-        });
-      }
-
-      // Create list payload
       const listPayload = {
         to: `${phoneNumber}@s.whatsapp.net`,
         type: "list",
         header: { text: "Available Projects" },
         body: {
-          text: `📋 *Your Projects* (Page ${page}/${totalPages})\n\nSelect a project to view or update:`,
+          text: `📋 *Your Projects* (Page ${page}/${totalPages})\n\nSelect a project:`,
         },
         footer: { text: "Powered by ShikshaLokam" },
         action: {
           list: {
             label: "View Projects",
-            sections: [
-              {
-                title: "Projects",
-                rows: listItems,
-              },
-            ],
+            sections: [{ title: "Projects", rows: listItems }],
           },
         },
       };
 
       await whatsappService.sendInteractiveMessage(listPayload);
-
-      // Send pagination buttons separately if needed
-      if (buttons.length > 0) {
-        await whatsappService.sendInteractiveMessage({
-          to: phoneNumber,
-          type: "button",
-          body: { text: "Navigate pages:" },
-          action: { buttons },
-        });
-      }
 
       Logger.info("Listed projects", { phoneNumber, page, totalPages });
     } catch (error) {
@@ -681,18 +512,13 @@ class ProjectService {
     }
   }
 
-  /**
-   * Search for projects by name
-   * Returns project details if single match, or list if multiple matches
-   */
-  async searchProjectByName(phoneNumber, projectName) {
+  async searchProjectByName(phoneNumber, projectName, getTask = false) {
     try {
       Logger.info("Searching for project by name", {
         phoneNumber,
         projectName,
       });
 
-      // Call the API with search parameter
       const url = `${
         this.apiBaseUrl
       }/project/v1/solutions/targetedSolutions?type=improvementProject&page=1&limit=10&filter=assignedToMe&search=${encodeURIComponent(
@@ -704,88 +530,35 @@ class ProjectService {
         url,
         process.env.ELEVATE_AUTH_TOKEN,
         {
-          state: "6863a9941d52e30014093ad9",
-          district: "6863aa5f1d52e30014093b48",
-          block: "6863aaad1d52e30014093b8e",
-          cluster: "6863ab011d52e30014093d27",
-          school: "68650f6f633ad100153fdb4c",
-          professional_role: "6867add70d8d24001465c3e4",
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
           professional_subroles:
-            "6867b0530d8d24001465c409,6867b0530d8d24001465c40b,6867b0530d8d24001465c40d,6867b0530d8d24001465c40f,6867b0530d8d24001465c411,6867b0530d8d24001465c413,6867b0530d8d24001465c415,6867b0530d8d24001465c417,6867b0530d8d24001465c419,6867b0530d8d24001465c41b,6867b0530d8d24001465c41d,6867b0530d8d24001465c41f,6867b0530d8d24001465c421,6867b0530d8d24001465c423,6867b0530d8d24001465c425,6867b0530d8d24001465c427,6867b0530d8d24001465c429,6867b0530d8d24001465c42b,6867b0530d8d24001465c42d,6867b0530d8d24001465c42f,6867b0530d8d24001465c431,6867b0530d8d24001465c433,6867b0530d8d24001465c435,6867b0530d8d24001465c437,6867b0530d8d24001465c439,6867b0530d8d24001465c43b,6867b0530d8d24001465c43d,6867b0530d8d24001465c43f,6867b0530d8d24001465c441,6867b0530d8d24001465c443,6867b0530d8d24001465c445,6867b0530d8d24001465c447,6867b0530d8d24001465c449,6867b0530d8d24001465c44b",
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb",
           organizations: "[object Object]",
         }
       );
 
       const projects = response?.data?.result?.data || [];
 
-      Logger.info("Search results", {
-        phoneNumber,
-        projectName,
-        matchCount: projects.length,
-      });
-
-      // No projects found
       if (projects.length === 0) {
         await whatsappService.sendMessage(
           phoneNumber,
-          `❌ No project found with name: "${projectName}"\n\n` +
-            `Please check the spelling or try "list projects" to see all your projects.`
+          `❌ No project found with name: "${projectName}"`
         );
-
-        return {
-          success: false,
-          message: "No projects found",
-        };
+        return { success: false, message: "No projects found" };
       }
 
-      // Single project found - show details directly
       if (projects.length === 1) {
-        const project = projects[0];
-        const hasProjectId = project?._id && project._id.trim() !== "";
-        const projectId = hasProjectId ? project._id : null;
-        const solutionId = project.solutionId;
-        const projectType = hasProjectId
-          ? "solutionWithProject"
-          : "solutionWithoutProject";
-
-        Logger.info("Single project found, showing details", {
+        return await this.handleSingleProjectFound(
           phoneNumber,
-          projectId,
-          solutionId,
-          projectType,
-        });
-
-        // Update flow state
-        await usersQueries.updateLastMessage(phoneNumber, {
-          flow: "project_detail",
-          step: 0,
-          context: { projectId, solutionId, project },
-          text: `view_project_${projectId || solutionId}`,
-        });
-
-        // Show project details
-        await this.showProjectDetailsFromData(
-          phoneNumber,
-          project,
-          projectType,
-          projectId,
-          solutionId
+          projects[0],
+          projectName,
+          getTask
         );
-
-        return {
-          success: true,
-          projectFound: true,
-          projectId,
-          solutionId,
-          projectType,
-        };
       }
-
-      // Multiple projects found - show selection list
-      Logger.info("Multiple projects found, showing selection list", {
-        phoneNumber,
-        matchCount: projects.length,
-      });
 
       await this.showProjectSelectionList(phoneNumber, projects, projectName);
 
@@ -796,33 +569,74 @@ class ProjectService {
       };
     } catch (error) {
       Logger.error("Error searching project by name", error);
-
-      await whatsappService.sendMessage(
-        phoneNumber,
-        "❌ Failed to search for project. Please try again."
-      );
-
       throw error;
     }
   }
 
-  /**
-   * Show project details from already fetched data
-   * (Extracted from showProjectDetails to avoid duplicate API call)
-   */
+  async handleSingleProjectFound(phoneNumber, project, projectName, getTask) {
+    try {
+      const hasProjectId = project?._id && project._id.trim() !== "";
+      const projectId = hasProjectId ? project._id : null;
+      const solutionId = project.solutionId;
+      const projectType = hasProjectId
+        ? "solutionWithProject"
+        : "solutionWithoutProject";
+
+      const projectDataResult = await this.getProjectData(
+        phoneNumber,
+        projectId,
+        solutionId
+      );
+
+      const fullProjectData = projectDataResult?.project || project;
+
+      await usersQueries.updateLastMessage(phoneNumber, {
+        flow: "project_detail",
+        step: 0,
+        context: {
+          projectId,
+          solutionId,
+          project: fullProjectData,
+          projectType: projectDataResult?.projectType || projectType,
+        },
+        text: `view_project_${projectId || solutionId}`,
+      });
+
+      let projectData = await this.showProjectDetailsFromData(
+        phoneNumber,
+        fullProjectData,
+        projectType,
+        projectId,
+        solutionId,
+        getTask //getTasl
+      );
+
+      return {
+        success: true,
+        projectFound: true,
+        projectId,
+        solutionId,
+        projectType,
+        projectData,
+      };
+    } catch (error) {
+      Logger.error("Error handling single project found", error);
+      throw error;
+    }
+  }
+
   async showProjectDetailsFromData(
     phoneNumber,
     project,
     projectType,
     projectId,
-    solutionId
+    solutionId,
+    getTask = false
   ) {
     try {
-      // Fetch full details if needed
       let fullProject = project;
 
-      // If we only have basic info, fetch full details
-      // if (!project.description || !project.status) {
+      // Fetch full details if needed
       const url =
         projectType === "solutionWithProject"
           ? `${this.apiBaseUrl}/project/v1/userProjects/details/${projectId}`
@@ -833,55 +647,43 @@ class ProjectService {
         url,
         process.env.ELEVATE_AUTH_TOKEN,
         {
-          state: "6863a9941d52e30014093ad9",
-          district: "6863aa5f1d52e30014093b48",
-          block: "6863aaad1d52e30014093b8e",
-          cluster: "6863ab011d52e30014093d27",
-          school: "68650f6f633ad100153fdb4c",
-          professional_role: "6867add70d8d24001465c3e4",
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
           professional_subroles:
-            "6867b0530d8d24001465c409,6867b0530d8d24001465c40b,6867b0530d8d24001465c40d,6867b0530d8d24001465c40f,6867b0530d8d24001465c411,6867b0530d8d24001465c413,6867b0530d8d24001465c415,6867b0530d8d24001465c417,6867b0530d8d24001465c419,6867b0530d8d24001465c41b,6867b0530d8d24001465c41d,6867b0530d8d24001465c41f,6867b0530d8d24001465c421,6867b0530d8d24001465c423,6867b0530d8d24001465c425,6867b0530d8d24001465c427,6867b0530d8d24001465c429,6867b0530d8d24001465c42b,6867b0530d8d24001465c42d,6867b0530d8d24001465c42f,6867b0530d8d24001465c431,6867b0530d8d24001465c433,6867b0530d8d24001465c435,6867b0530d8d24001465c437,6867b0530d8d24001465c439,6867b0530d8d24001465c43b,6867b0530d8d24001465c43d,6867b0530d8d24001465c43f,6867b0530d8d24001465c441,6867b0530d8d24001465c443,6867b0530d8d24001465c445,6867b0530d8d24001465c447,6867b0530d8d24001465c449,6867b0530d8d24001465c44b",
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb",
           organizations: "[object Object]",
         }
       );
 
       fullProject = response?.data?.result || response?.data || project;
-      // }
 
-      // Sync to DB if it's a solutionWithProject
       if (projectType === "solutionWithProject") {
         await this.syncProjectToDB(fullProject, phoneNumber, 1);
       }
 
-      // Format project details message
       const detailsText =
         `*📁 ${fullProject.title ?? fullProject.name}*\n\n` +
         `${fullProject.description ? `${fullProject.description}\n\n` : ""}` +
         `*Duration:* ${fullProject.duration || "N/A"}\n` +
-        `*Status:* ${fullProject.status || "Unknown"}\n` +
-        `\nWhat would you like to do?`;
+        `*Status:* ${fullProject.status || "Unknown"}\n\n` +
+        `What would you like to do?`;
 
       const projectStatus = fullProject.status?.toLowerCase();
-
-      // Build buttons based on project type and status
       const buttons = [];
 
       if (projectType === "solutionWithoutProject") {
-        // For solutions without project - show start project button
         buttons.push(
           {
             type: "quick_reply",
             title: "🚀 Start Project",
             id: `start_improvement_${projectId || solutionId}`,
           },
-          {
-            type: "quick_reply",
-            title: "⬅️ Back to List",
-            id: "back_to_list",
-          }
+          { type: "quick_reply", title: "⬅️ Back to List", id: "back_to_list" }
         );
       } else {
-        // For active/in-progress projects
         if (projectStatus !== "submitted" && projectStatus !== "completed") {
           buttons.push(
             {
@@ -897,8 +699,7 @@ class ProjectService {
           );
         }
 
-        // For submitted projects - show report button
-        if (projectStatus === "submitted") {
+        if (projectStatus === "submitted" || projectStatus === "completed") {
           buttons.push({
             type: "quick_reply",
             title: "📊 View Report",
@@ -906,23 +707,14 @@ class ProjectService {
           });
         }
 
-        // For completed projects - show both report and certificate
         if (projectStatus === "completed") {
-          buttons.push(
-            {
-              type: "quick_reply",
-              title: "📊 View Report",
-              id: `view_report_${projectId}`,
-            },
-            {
-              type: "quick_reply",
-              title: "🏆 View Certificate",
-              id: `view_certificate_${projectId}`,
-            }
-          );
+          buttons.push({
+            type: "quick_reply",
+            title: "🏆 View Certificate",
+            id: `view_certificate_${projectId}`,
+          });
         }
 
-        // Always add back button
         buttons.push({
           type: "quick_reply",
           title: "⬅️ Back to List",
@@ -930,40 +722,30 @@ class ProjectService {
         });
       }
 
-      // Limit to 3 buttons max for WhatsApp
       const displayButtons = buttons.slice(0, 3);
 
-      await whatsappService.sendInteractiveMessage({
-        to: phoneNumber,
-        type: "button",
-        header: { text: "Project Details" },
-        body: { text: detailsText },
-        footer: { text: "Powered by ShikshaLokam" },
-        action: { buttons: displayButtons },
-      });
+      if (!getTask) {
+        await whatsappService.sendInteractiveMessage({
+          to: phoneNumber,
+          type: "button",
+          header: { text: "Project Details" },
+          body: { text: detailsText },
+          footer: { text: "Powered by ShikshaLokam" },
+          action: { buttons: displayButtons },
+        });
+      } else {
+        return fullProject;
+      }
 
-      Logger.info("Project details shown from search", {
-        phoneNumber,
-        projectId,
-        solutionId,
-      });
+      Logger.info("Project details shown", { phoneNumber, projectId });
     } catch (error) {
       Logger.error("Error showing project details from data", error);
       throw error;
     }
   }
 
-  /**
-   * Show project selection list when multiple matches found
-   */
   async showProjectSelectionList(phoneNumber, projects, searchTerm) {
     try {
-      Logger.info("Showing project selection list", {
-        phoneNumber,
-        projectCount: projects.length,
-      });
-
-      // Create list items from search results
       const listItems = projects.map((project) => {
         const hasProjectId = project?._id && project._id.trim() !== "";
         const projectId = hasProjectId ? project._id : project?.solutionId;
@@ -974,39 +756,29 @@ class ProjectService {
         return {
           id: `${type}_${projectId}`,
           title: project.name,
-          description: `Status: ${project.status || "Not Started"}`,
+          description: `Status: ${project.status || "N/A"}`,
         };
       });
 
-      // Update flow state
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "project_browse",
         step: 1,
-        context: {
-          searchTerm,
-          action: "search_results",
-        },
+        context: { searchTerm, action: "search_results" },
         text: `search_results_${searchTerm}`,
       });
 
-      // Send interactive list
       const listPayload = {
         to: `${phoneNumber}@s.whatsapp.net`,
         type: "list",
         header: { text: "Multiple Projects Found" },
         body: {
-          text: `🔍 Found ${projects.length} projects matching "${searchTerm}"\n\nSelect the project you want to view:`,
+          text: `🔍 Found ${projects.length} projects matching "${searchTerm}"\n\nSelect one:`,
         },
         footer: { text: "Powered by ShikshaLokam" },
         action: {
           list: {
             label: "Select Project",
-            sections: [
-              {
-                title: "Matching Projects",
-                rows: listItems,
-              },
-            ],
+            sections: [{ title: "Matching Projects", rows: listItems }],
           },
         },
       };
@@ -1023,47 +795,28 @@ class ProjectService {
     }
   }
 
-  /**
-   * Handle project update flow
-   */
   async handleProjectUpdateFlow(phoneNumber, messageText, lastMessage) {
     try {
-      const step = lastMessage.step || 1;
-      const context = lastMessage.context || {};
-
-      Logger.info("Project update flow", { phoneNumber, step });
-
-      // Add your project update logic here
-      // Similar to creation flow but for updating existing projects
+      Logger.info("Project update flow", { phoneNumber });
+      // Add your update logic here
     } catch (error) {
       Logger.error("Error in project update flow", error);
       throw error;
     }
   }
 
-  /**
-   * Handle interactive responses (pagination, confirmations)
-   */
   async handleInteractiveResponse(phoneNumber, action) {
     try {
-      Logger.info("Handling interactive response", { phoneNumber, action });
-
-      // Handle project confirmation
       if (action === "confirm_project") {
         const lastMessage = await usersQueries.getLastMessage(phoneNumber);
         const projectData = lastMessage.context;
 
-        // TODO: Save project to database
-        Logger.info("Saving project", { phoneNumber, projectData });
-
         await whatsappService.sendMessage(
           phoneNumber,
           "🎉 *Project created successfully!*\n\n" +
-            `Project: ${projectData.projectName}\n\n` +
-            "What would you like to do next?"
+            `Project: ${projectData.projectName}`
         );
 
-        // Clear flow state
         await usersQueries.clearLastMessage(phoneNumber);
         return;
       }
@@ -1077,7 +830,6 @@ class ProjectService {
         return;
       }
 
-      // Handle pagination
       if (/^next_page_(\d+)$/.test(action)) {
         const page = parseInt(action.match(/\d+/)[0]);
         await this.listProjects(phoneNumber, page);
@@ -1089,104 +841,62 @@ class ProjectService {
         await this.listProjects(phoneNumber, page);
         return;
       }
-
-      // Handle project selection
-      if (/^project_(\d+)$/.test(action)) {
-        const projectId = action.match(/\d+/)[0];
-        Logger.info("Project selected", { phoneNumber, projectId });
-
-        // TODO: Load project details and start update flow
-        await whatsappService.sendMessage(
-          phoneNumber,
-          `📂 Loading project #${projectId}...`
-        );
-      }
     } catch (error) {
       Logger.error("Error handling interactive response", error);
       throw error;
     }
   }
 
-  // ============================================
-  // ADD: Handle Start Improvement Project
-  // ============================================
-
-  /**
-   * Handle start improvement project flow (for solutionWithoutProject)
-   */
   async handleStartImprovementProject(phoneNumber, solutionId, projectData) {
     try {
-      Logger.info("Starting improvement project", {
-        phoneNumber,
-        solutionId,
-      });
+      Logger.info("Starting improvement project", { phoneNumber, solutionId });
 
-      // Call details endpoint with solutionId and templateId (external_id)
-      const templateId = projectData.externalId; // From the response
-
+      const templateId = projectData.externalId;
       const url = `${this.apiBaseUrl}/project/v1/userProjects/details?solutionId=${solutionId}&templateId=${templateId}`;
-
-      Logger.info("Fetching improvement project details", {
-        phoneNumber,
-        url,
-      });
 
       const response = await makeApiRequest(
         "POST",
         url,
         process.env.ELEVATE_AUTH_TOKEN,
         {
-          state: "6863a9941d52e30014093ad9",
-          district: "6863aa5f1d52e30014093b48",
-          block: "6863aaad1d52e30014093b8e",
-          cluster: "6863ab011d52e30014093d27",
-          school: "68650f6f633ad100153fdb4c",
-          professional_role: "6867add70d8d24001465c3e4",
+          state: "6852c86c7248c20014b38a4d",
+          district: "6852c8ae7248c20014b38a57",
+          block: "6852c8de7248c20014b38a9d",
+          cluster: "6852c9027248c20014b38c34",
+          professional_role: "6825950197b5680013e6a17c",
           professional_subroles:
-            "6867b0530d8d24001465c409,6867b0530d8d24001465c40b,6867b0530d8d24001465c40d,6867b0530d8d24001465c40f,6867b0530d8d24001465c411,6867b0530d8d24001465c413,6867b0530d8d24001465c415,6867b0530d8d24001465c417,6867b0530d8d24001465c419,6867b0530d8d24001465c41b,6867b0530d8d24001465c41d,6867b0530d8d24001465c41f,6867b0530d8d24001465c421,6867b0530d8d24001465c423,6867b0530d8d24001465c425,6867b0530d8d24001465c427,6867b0530d8d24001465c429,6867b0530d8d24001465c42b,6867b0530d8d24001465c42d,6867b0530d8d24001465c42f,6867b0530d8d24001465c431,6867b0530d8d24001465c433,6867b0530d8d24001465c435,6867b0530d8d24001465c437,6867b0530d8d24001465c439,6867b0530d8d24001465c43b,6867b0530d8d24001465c43d,6867b0530d8d24001465c43f,6867b0530d8d24001465c441,6867b0530d8d24001465c443,6867b0530d8d24001465c445,6867b0530d8d24001465c447,6867b0530d8d24001465c449,6867b0530d8d24001465c44b",
+            "6825ad1f97b5680013e844fa,6825ad1f97b5680013e844fb",
           organizations: "[object Object]",
         }
       );
 
-      if (!response.success) {
-        throw new Error("Failed to fetch improvement project details");
+      const improvementProject = response?.data?.result;
+
+      if (!improvementProject) {
+        throw new Error("Failed to fetch improvement project");
       }
-
-      const improvementProject = response.data.result;
-
-      Logger.info("Improvement project details fetched", {
-        phoneNumber,
-        taskCount: improvementProject.tasks?.length || 0,
-      });
 
       await this.syncProjectToDB(improvementProject, phoneNumber, 1);
 
-      // Store project data and show tasks
       await usersQueries.updateLastMessage(phoneNumber, {
         flow: "improvement_project",
         step: 0,
-        context: {
-          projectData: improvementProject,
-          solutionId,
-          templateId,
-        },
+        context: { projectData: improvementProject, solutionId, templateId },
         text: "view_improvement_project",
       });
 
-      // Show tasks menu
       await taskService.showTasksMenu(phoneNumber, improvementProject);
     } catch (error) {
       Logger.error("Error starting improvement project", error);
       await whatsappService.sendMessage(
         phoneNumber,
-        "❌ Error loading improvement project. Please try again."
+        "❌ Error loading project. Please try again."
       );
     }
   }
+
   async handleProjectPagination(phoneNumber, action) {
     try {
-      Logger.info("Handling project pagination", { phoneNumber, action });
-
       let page = 1;
 
       if (action.startsWith("next_projects_")) {
@@ -1197,7 +907,6 @@ class ProjectService {
 
       if (isNaN(page) || page < 1) page = 1;
 
-      // Fetch next/previous page
       await this.listProjects(phoneNumber, page);
     } catch (error) {
       Logger.error("Error handling project pagination", error);
@@ -1207,9 +916,10 @@ class ProjectService {
       );
     }
   }
+
   async syncProjectToDB(projectData, userPhone, userId) {
     const projectId = projectData._id;
-
+    
     // Map tasks including type in storage ⚡
     const mappedTasks = (projectData.tasks || []).map((task) => ({
       taskId: task.referenceId || task._id,
@@ -1217,6 +927,14 @@ class ProjectService {
       type: task.type || "simple", // 👈 Store type also
       status: task.status || "notStarted",
       endDate: task.updatedAt ? new Date(task.updatedAt) : null,
+      ..._.omit(task, [
+        "_id",
+        "referenceId",
+        "name",
+        "type",
+        "status",
+        "updatedAt",
+      ]),
       evidence: [],
     }));
 
@@ -1249,8 +967,6 @@ class ProjectService {
 
     return result;
   }
-
-  // Update these methods in projectService.js
 
   /**
    * Generate and send project report
@@ -1472,6 +1188,154 @@ class ProjectService {
         "❌ Failed to send certificate. Please try again later."
       );
     }
+  }
+
+  /**
+   * Helper function to resolve project data from either projectId or projectName
+   * Handles both MongoDB and API fetching with syncing
+   *
+   * @param {string} phoneNumber - User's phone number
+   * @param {string} projectId - Project ID (optional if projectName provided)
+   * @param {string} projectName - Project name (optional if projectId provided)
+   * @returns {Promise<{success: boolean, projectData: object, finalProjectId: string, error?: string}>}
+   */
+  async resolveProject(phoneNumber, projectId, projectName) {
+    try {
+      if (!phoneNumber) {
+        return {
+          success: false,
+          error: "Phone number is required",
+        };
+      }
+
+      if (!projectId && !projectName) {
+        return {
+          success: false,
+          error: "Either projectId or projectName is required",
+        };
+      }
+
+      let finalProjectId = projectId;
+
+      // If projectName provided but not projectId, search for the project first
+      if (!projectId && projectName) {
+        Logger.info("Resolving project by name", {
+          phoneNumber,
+          projectName,
+        });
+
+        const searchResult = await this.searchProjectByName(
+          phoneNumber,
+          projectName,
+          true
+        );
+
+        if (!searchResult.success || !searchResult.projectId) {
+          return {
+            success: false,
+            error: `Project "${projectName}" not found`,
+            projectName,
+          };
+        }
+
+        finalProjectId = searchResult.projectId;
+      }
+
+      // Step 1: Try to get from MongoDB
+      let projectData = await Project.findOne(
+        { projectId: finalProjectId, phoneNumber },
+        {
+          projectId: 1,
+          projectName: 1,
+          solutionId: 1,
+          tasks: 1,
+          projectData: 1,
+        }
+      ).lean();
+
+      // Step 2: If not in DB, fetch from API and sync
+      if (!projectData) {
+        Logger.info("Project not in DB, fetching from API", {
+          phoneNumber,
+          projectId: finalProjectId,
+        });
+
+        const apiProjectData = await projectService.fetchProjectFromAPI(
+          finalProjectId
+        );
+
+        if (apiProjectData) {
+          await projectService
+            .syncProjectToDB(apiProjectData, phoneNumber, 1)
+            .catch((err) => {
+              Logger.warn("Failed to sync project to DB", { err });
+            });
+
+          projectData = {
+            projectId: finalProjectId,
+            projectName: apiProjectData.title || apiProjectData.name,
+            solutionId: apiProjectData.solutionId,
+            tasks: apiProjectData.tasks || [],
+          };
+        }
+      }
+
+      if (!projectData) {
+        return {
+          success: false,
+          error: "Project not found",
+          projectId: finalProjectId,
+        };
+      }
+
+      return {
+        success: true,
+        projectData,
+        finalProjectId,
+      };
+    } catch (error) {
+      Logger.error("Error resolving project", error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Helper function to validate task parameters
+   *
+   * @param {string} phoneNumber - User's phone number
+   * @param {number} taskIndex - Task index (1-based)
+   * @param {string} status - Task status (optional, for update operations)
+   * @returns {object} - Validation result with success flag and error message
+   */
+  async validateTaskParameters(phoneNumber, taskIndex, status = null) {
+    if (!phoneNumber) {
+      return {
+        success: false,
+        error: "Phone number is required",
+      };
+    }
+
+    if (taskIndex === undefined || taskIndex === null) {
+      return {
+        success: false,
+        error: "Task index is required",
+      };
+    }
+
+    if (status) {
+      const validStatuses = ["notStarted", "inProgress", "completed"];
+      if (!validStatuses.includes(status)) {
+        return {
+          success: false,
+          error: `Invalid status. Must be one of: ${validStatuses.join(", ")}`,
+        };
+      }
+    }
+
+    return { success: true };
   }
 }
 

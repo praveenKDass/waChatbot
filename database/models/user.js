@@ -119,7 +119,6 @@ const usersSchema = new Schema(
 );
 
 // Indexes
-usersSchema.index({ phoneNumber: 1 });
 usersSchema.index({ status: 1 });
 usersSchema.index({ createdAt: -1 });
 usersSchema.index({ lastInteractionAt: -1 }); // For inactivity queries

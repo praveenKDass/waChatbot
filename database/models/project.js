@@ -40,21 +40,6 @@ const ProjectSchema = new mongoose.Schema(
 
     // Task progress tracking
     tasks: [
-      {
-        taskId: String,
-        taskName: String,
-        status: {
-          type: String,
-          enum: ["notStarted", "inProgress", "completed"],
-          default: "notStarted",
-        },
-        endDate: Date,
-        evidence: [
-          {
-           
-          },
-        ],
-      },
     ],
 
     // Submission tracking

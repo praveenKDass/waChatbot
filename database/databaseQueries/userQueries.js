@@ -172,4 +172,9 @@ module.exports = class users {
       { new: true }
     ).lean();
   }
+
+  static findUserByPhone(phoneNumber, projection = {}) {
+    return this.findOne({ phoneNumber }, projection);
+  }
+  
 }
