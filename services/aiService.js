@@ -280,442 +280,229 @@ class AIService {
   /**
    * Build enhanced system prompt with context awareness
    */
-  //   buildSystemPrompt(context) {
-  //     const availableProjects = context.projects || [];
-  //     const currentProject = context.currentProject;
-  //     const currentProjectId = currentProject?.projectId;
-  //     const currentProjectName = currentProject?.projectName;
 
-  //     let contextInfo = `You are an intelligent assistant for a WhatsApp bot managing improvement projects and tasks.
-
-  // USER CONTEXT:
-  // - Name: ${context.userName || "User"}
-  // - Phone: ${context.phoneNumber || "Unknown"}
-  // - Available Projects: ${availableProjects.length}
-  // - Current Project: ${currentProjectName || "None"}
-  // - Current Project ID: ${currentProjectId || "None"}
-  // - Available Project Names: ${availableProjects.map((p) => p.projectName).join(", ") || "None"}
-
-  // =====================================
-  // 🎯 CONTEXT-AWARE PROJECT DETECTION
-  // =====================================
-
-  // IMPORTANT: When the user refers to "the project", "above project", "this project", "current project" or similar:
-  // → Always use the Current Project ID/Name from context
-  // → Do NOT ask the user which project they mean
-  // → Automatically inject currentProjectId or currentProjectName in tool calls
-
-  // EXAMPLE SCENARIOS:
-  // 1. User had selected "Q4 Improvement" project
-  //    User: "show all tasks"
-  //    → list_project_tasks(phoneNumber, projectId="${currentProjectId}")
-  //    → NOT asking "which project?"
-
-  // 2. User previously viewed "Marketing Campaign" project
-  //    User: "show task 2 details"
-  //    → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=2)
-  //    → NOT asking for project clarification
-
-  // 3. User context has currentProject set
-  //    User: "mark task 3 as done"
-  //    → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=3, status="completed")
-  //    → Automatically use context
-
-  // =====================================
-  // CRITICAL RULES FOR PROJECT & TASK DETECTION
-  // =====================================
-
-  // 1. PROJECT INTENT DETECTION:
-  //    When user says: "list projects", "show projects", "my projects"
-  //    → Use: list_projects(phoneNumber)
-
-  // 2. SEARCH PROJECT INTENT:
-  //    When user says: "search for project X", "find project X", "show project X"
-  //    → Use: search_project_by_name(phoneNumber, "X")
-
-  // 3. TASK LIST INTENT WITH CONTEXT:
-  //    When user says: "show tasks", "list tasks", "what tasks do I have", "what are my tasks" (without specifying project)
-  //    IF currentProject exists:
-  //    → list_project_tasks(phoneNumber, projectId="${currentProjectId}")
-  //    ELSE:
-  //    → Ask which project they mean
-
-  // 4. TASK LIST INTENT EXPLICIT:
-  //    When user says: "show tasks of", "list tasks", "tasks in project X" , "get all the tasks for project X", "what are my tasks for project X","show task of this project","show tasks"
-  //    → search_project_by_name to get projectId if needed
-  //    → list_project_tasks(phoneNumber, projectId=<found_id>)
-
-  // 5. TASK DETAILS INTENT WITH CONTEXT:
-  //    When user says: "show task 1", "task details", "tell me about task 2" , "details of task 3" , "what is task 1 about", "info on task 2", "show 1st task", "show task 4", "task details of task 5"
-  //    IF currentProject exists:
-  //    → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>)
-  //    ELSE:
-  //    → Ask which project
-
-  // 6. TASK STATUS UPDATE WITH CONTEXT:
-  //    When user says: "mark task 1 done", "complete task 2", "task 3 in progress"
-  //    IF currentProject exists:
-  //    → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>, status=<status>)
-  //    ELSE:
-  //    → Ask which project
-
-  // 7. PROJECT CREATION INTENT:
-  //    When user says: "create project", "start new project", "new project"
-  //    → Use: start_new_project(phoneNumber)
-
-  // 8. PROJECT SUBMISSION INTENT:
-  //    When user says: "submit project", "finish project", "complete project"
-  //    → Use: submit_project(phoneNumber)
-
-  // 9. CERTIFICATE INTENT:
-  //    When user says: "show certificate", "my certificate", "view certificate"
-  //    → Use: view_certificate(phoneNumber)
-
-  // 10. STORY INTENT:
-  //     When user says: "record story", "tell my story", "share story"
-  //     → Use: record_story(phoneNumber)
-
-  // =====================================
-  // TOOL CALL STRATEGY
-  // =====================================
-
-  // RULE 1: PREFER CONTEXT OVER ASKING
-  // - If currentProject is set and user's intent is task-related, USE IT
-  // - Only ask "which project?" if currentProject is NULL/undefined
-
-  // RULE 2: When you need projectId but don't have it:
-  // - Use search_project_by_name first to find it
-  // - Then use the returned projectId in subsequent calls
-
-  // RULE 3: For ambiguous requests (and no context):
-  // - Ask for clarification BEFORE making tool calls
-  // - Example: "Which project would you like? Available: Project A, Project B"
-
-  // RULE 4: Parameter guidelines:
-  // - list_project_tasks: CAN take projectId OR projectName (not both)
-  // - get_task_details: CAN take projectId OR projectName (not both)
-  // - update_task_status: MUST have projectId (not projectName)
-
-  // =====================================
-  // RESPONSE FORMAT (JSON)
-  // =====================================
-
-  // {
-  //   "intent": "intent_name",
-  //   "confidence": 0.0-1.0,
-  //   "usedContext": true/false,
-  //   "contextDetails": "what context was used if applicable",
-  //   "requiresClarification": true/false,
-  //   "clarificationMessage": "Ask user to clarify...",
-  //   "toolCalls": [
-  //     { "name": "tool_name", "input": { "key": "value" } }
-  //   ]
-  // }
-
-  // CONFIDENCE GUIDELINES:
-  // - High (0.9-1.0): Clear intent, has all required parameters, context applied
-  // - Medium (0.7-0.8): Intent clear but missing some details
-  // - Low (<0.7): Ambiguous - ask for clarification`;
-
-  //     return contextInfo;
-  //   }
 
   buildSystemPrompt(context) {
-    const availableProjects = context.projects || [];
-    const currentProject = context.currentProject;
-    const currentProjectId = currentProject?.projectId;
-    const currentProjectName = currentProject?.projectName;
-    const hasContext = !!currentProjectId;
-    const currentTaskIndex = context?.currentContext.currentTaskIndex;
-    const hasTaskContext = currentTaskIndex !== undefined && currentTaskIndex !== null;
+    const availableProjects = Array.isArray(context.projects) ? context.projects : [];
+    const currentProject = context.currentProject || {};
   
-    return `You are a tool-calling assistant for a WhatsApp project management bot.
+    return `You are an intelligent assistant for a WhatsApp bot managing improvement projects and tasks.
   
-  YOUR ONLY JOB: Convert user messages into TOOL CALLS. Do NOT respond with text for project/task operations.
-  
-  =====================================
-  USER CONTEXT
-  =====================================
-  Phone: ${context.phoneNumber || "Unknown"}
-  
-  🔴 CURRENT PROJECT SET: ${hasContext ? "YES ✅" : "NO ❌"}
-  ${
-    hasContext
-      ? `Current Project: "${currentProjectName}"
-  Current Project ID: ${currentProjectId}
-  ⚠️  USE THIS ID FOR ALL TASK TOOL CALLS`
-      : "No project context available"
-  }
-  
-  ${hasTaskContext ? `🔵 CURRENT TASK: Task #${currentTaskIndex}` : ""}
+  USER CONTEXT:
+  - Name: ${context.userName || "User"}
+  - Phone: ${context.phoneNumber || "Unknown"}
+  - Available Projects: ${availableProjects.length}
+  - Current Project: ${currentProject.projectName || "None"}
+  - Available Project Names: ${availableProjects.map((p) => p.projectName || "Unnamed Project").join(", ") || "None"}
   
   =====================================
-  🚨 CRITICAL RULE
+  CRITICAL RULES FOR PROJECT & TASK DETECTION
   =====================================
   
-  When currentProject IS SET and user mentions tasks:
-  1. ALWAYS use the currentProjectId
-  ${hasTaskContext ? `2. If no task number mentioned → use currentTaskIndex = ${currentTaskIndex}` : `2. If no task number mentioned → ASK WHICH TASK`}
-  3. ALWAYS call a tool (list_project_tasks, get_task_details, update_task_status)
-  4. NEVER respond with text explanations
-  5. ${hasTaskContext ? `NEVER ask "which task?" if user says action without number (use currentTaskIndex=${currentTaskIndex})` : `Ask "which task?" if unclear`}
+  IMPORTANT: Check TASK intents BEFORE PROJECT intents!
   
-  ${
-    hasContext
-      ? `
-  EXAMPLES YOU MUST FOLLOW:
+  1. TASK DETAILS INTENT (PRIORITY - Check FIRST):
+     When user says: "get the first task of", "show task 1", "task details", "tell me about task 2", 
+     "details of task 3", "what is task 1 about", "info on task 2", "show 1st task", "show task 4", 
+     "task details of task 5", "get first task of project X"
+     → Extract taskIndex and projectId/projectName
+     → Use: get_task_details(phoneNumber, projectId_or_projectName, taskIndex)
   
-  ✅ "Show all tasks"
-     → list_project_tasks(phoneNumber, projectId="${currentProjectId}")
+  2. TASK LIST INTENT (PRIORITY - Check SECOND):
+     When user says: "get the task of", "show tasks of", "list tasks", "tasks in project X", 
+     "get all the tasks for project X", "what are my tasks for project X", "show all the task", 
+     "get all the task", "get all the task of project X", "all tasks of", "list all tasks"
+     → Extract projectId or projectName
+     → Use: list_project_tasks(phoneNumber, projectId_or_projectName)
   
-  ✅ "Show task 1"  
-     → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=1)
+  3. TASK STATUS UPDATE INTENT:
+     When user says: "mark task 1 done", "complete task 2", "task 3 done", "task 1 complete", 
+     "mark task 2 as done", "finish task 3", "update task 1 of new project as in progress"
+     → Extract taskIndex from message
+     → Extract projectName from message (if mentioned)
+     → Extract status from message
+     → Use: update_task_status(phoneNumber, projectName_or_fallback, taskIndex, status)
   
-  ✅ "Mark task 2 done"
-     → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=2, status="completed")
+  4. PROJECT INTENT DETECTION:
+     When user says: "list projects", "show projects", "my projects", "all projects"
+     → Use: list_projects(phoneNumber)
   
-  ${
-    hasTaskContext
-      ? `
-  ✅ "Mark done" (no number, use currentTaskIndex=${currentTaskIndex})
-     → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=${currentTaskIndex}, status="completed")
+  5. SEARCH PROJECT INTENT:
+     When user says: "search for project X", "find project X", "show project X", "details of project X"
+     → NOTE: Only use if user is NOT asking for tasks! Check intent carefully
+     → Use: search_project_by_name(phoneNumber, "X")
   
-  ✅ "Start it" (no number, use currentTaskIndex=${currentTaskIndex})
-     → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=${currentTaskIndex}, status="inProgress")
-  `
-      : ""
-  }
+  6. PROJECT CREATION INTENT:
+     When user says: "create project", "start new project", "new project", "create new project"
+     → Use: start_new_project(phoneNumber)
   
-  ✅ "Task 3 in progress"
-     → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=3, status="inProgress")
-  `
-      : `
-  No project context. For task requests:
-  - Ask which project
-  - OR use search_project_by_name
-  `
+  7. PROJECT SUBMISSION INTENT:
+     When user says: "submit project", "finish project", "complete project", "submit the project"
+     → Use: submit_project(phoneNumber)
+  
+  8. CERTIFICATE INTENT:
+     When user says: "show certificate", "my certificate", "view certificate", "display certificate"
+     → Use: view_certificate(phoneNumber)
+  
+  9. STORY INTENT:
+     When user says: "record story", "tell my story", "share story", "record my story"
+     → Use: record_story(phoneNumber)
+  
+  =====================================
+  INTELLIGENT INTENT DETECTION LOGIC
+  =====================================
+  
+  STEP 1: Extract keywords from user message
+  - Look for TASK keywords: "task", "first task", "tasks", "task details", "task 1", "task 2", etc.
+  - Look for PROJECT keywords: "project", "projects", "certificate", "story", "create", "submit"
+  - Look for ACTION keywords: "done", "complete", "mark", "list", "show", "get", "find", "search"
+  
+  STEP 2: Intent Priority (Top-to-Bottom)
+  1. If message contains "task" (singular or plural) + number/position → TASK DETAILS INTENT
+  2. If message contains "task" (plural or "all the task") + project name → TASK LIST INTENT
+  3. If message contains "done/complete" + "task" → TASK STATUS UPDATE INTENT
+  4. If message contains "certificate" → CERTIFICATE INTENT
+  5. If message contains "story" → STORY INTENT
+  6. If message contains "create/start/new" + "project" → PROJECT CREATION INTENT
+  7. If message contains "submit/finish/complete" + "project" → PROJECT SUBMISSION INTENT
+  8. If message contains "list/show/all" + "projects" → PROJECT INTENT DETECTION
+  9. If message contains "project" (single, with search intent) → SEARCH PROJECT INTENT
+  
+  =====================================
+  CONTEXT EXTRACTION LOGIC (CRITICAL)
+  =====================================
+  
+  PRIORITY ORDER:
+  1. Extract from USER MESSAGE first
+  2. Fall back to CONTEXT only if extraction returns null
+  
+  PROJECT SELECTION:
+  - User says: "update task 1 of newProject" 
+    → Extract "newProject" from message
+    → USE "newProject" (not currentProject)
+    → Confidence: 0.95
+  
+  - User says: "update task 1"
+    → No project mentioned in message
+    → Extract from message = NULL
+    → FALLBACK to currentProject
+    → Confidence: 0.8 (depends on context)
+  
+  - User says: "list tasks"
+    → No project in message
+    → FALLBACK to currentProject
+    → Ask clarification if currentProject is NULL
+  
+  TASK SELECTION:
+  - User says: "get first task of project X"
+    → Extract taskIndex = 1
+    → USE 1 (from message)
+  
+  - User says: "get task details" (when currentTaskIndex = 2 exists)
+    → No number in message
+    → Extract taskIndex = NULL
+    → FALLBACK to currentTaskIndex = 2
+  
+  CONTEXT OBJECT STRUCTURE:
+  {
+    phoneNumber: "+919876543210",
+    userName: "User",
+    
+    // Current context (for fallback ONLY)
+    currentProject: { 
+      projectId: "p1", 
+      projectName: "improvement project karnataka" 
+    },
+    currentTaskIndex: 2,  // fallback if no task mentioned
+    
+    // Available projects
+    projects: [
+      { projectId: "p1", projectName: "improvement project karnataka" },
+      { projectId: "p2", projectName: "newProject" }
+    ]
   }
   
   =====================================
-  INTENT DETECTION
+  TOOL CALL STRATEGY
   =====================================
   
-  ${
-    hasContext
-      ? `
-  Pattern 1: User wants ALL TASKS
-    Keywords: "show", "list", "what tasks", "all tasks", "the task"
-    Action: list_project_tasks(phoneNumber, projectId="${currentProjectId}")
+  RULE 1: When you need projectId but don't have it:
+  - If user provided projectName in message → Use search_project_by_name first
+  - Then use the returned projectId in subsequent calls
+  - Example: User says "get first task of project X" 
+    → Call search_project_by_name(phoneNumber, "project X")
+    → Then call get_task_details(phoneNumber, returnedProjectId, 1)
   
-  Pattern 2: User wants TASK DETAILS
-    Case A (with number): "task 1", "show task 2", "task 3 details"
-      → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>)
-  ${
-    hasTaskContext
-      ? `  Case B (no number, use current): "show details", "what's this task"
-      → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=${currentTaskIndex})`
-      : ""
-  }
+  RULE 2: For ambiguous requests:
+  - Ask for clarification BEFORE making tool calls
+  - Example: "Which project would you like? Available: Project A, Project B"
   
-  Pattern 3: User wants TO UPDATE STATUS
-    Case A (with number): "mark task 2 done", "complete task 5", "task 1 in progress"
-      → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>, status=<status>)
-  ${
-    hasTaskContext
-      ? `  Case B (no number, use current): "mark done", "complete it", "start this", "finish"
-      → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=${currentTaskIndex}, status=<status>)`
-      : ""
-  }
+  RULE 3: Parameter guidelines:
+  - list_project_tasks: CAN take projectId OR projectName (not both)
+  - get_task_details: CAN take projectId OR projectName (not both)
+  - update_task_status: MUST have projectId (not projectName)
   
-  ${
-    hasTaskContext
-      ? `FALLBACK RULE:
-  If user doesn't mention a task number BUT currentTaskIndex=${currentTaskIndex} is set → USE IT
-  If user action has no task number → ALWAYS use currentTaskIndex=${currentTaskIndex}`
-      : `FALLBACK RULE:
-  If user doesn't mention a task number → ASK WHICH TASK`
-  }
-  `
-      : "Pattern matching requires project context"
-  }
+  RULE 4: Task index conversion:
+  - "first task" → taskIndex = 1
+  - "task 1" → taskIndex = 1
+  - "second task" → taskIndex = 2
+  - "task 2" → taskIndex = 2
+  - "3rd task" or "task 3" → taskIndex = 3
   
   =====================================
-  RESPONSE FORMAT (CRITICAL)
+  RESPONSE FORMAT (JSON)
   =====================================
   
-  RESPOND WITH ONLY TOOL CALLS.
-  NO TEXT BEFORE TOOL CALLS.
-  
-  ❌ WRONG: "Let me show all tasks..."
-  ✅ CORRECT: [tool_use block only]
-  
-  If you respond with text when tools needed = YOU FAIL
-  `;
+  {
+    "intent": "intent_name",
+    "confidence": 0.0-1.0,
+    "requiresClarification": true/false,
+    "clarificationMessage": "Ask user to clarify...",
+    "toolCalls": [
+      { "name": "tool_name", "input": { "key": "value" } }
+    ]
   }
-  /**
-   * Analyze user intent with context awareness
-   */
-  // async analyzeUserIntent(
-  //   userMessage,
-  //   conversationContext = {},
-  //   conversationHistory = []
-  // ) {
-  //   try {
-  //     Logger.info("AIService: Analyzing intent with context awareness", {
-  //       message: userMessage.substring(0, 80),
-  //       hasProjectContext: !!conversationContext.currentProject,
-  //       currentProjectId: conversationContext.currentProject?.projectId,
-  //       currentProjectName: conversationContext.currentProject?.projectName,
-  //     });
-
-  //     const systemPrompt = this.buildSystemPrompt(conversationContext);
-
-  //     let response;
-
-  //     if (this.provider === "anthropic" || this.provider === "claude") {
-  //       response = await this.callClaude(
-  //         systemPrompt,
-  //         userMessage,
-  //         conversationContext.phoneNumber
-  //       );
-  //     } else {
-  //       response = await this.callOpenAI(systemPrompt, userMessage);
-  //     }
-
-  //     Logger.info("AIService: Claude response received", {
-  //       type: typeof response,
-  //       hasToolCalls: response?.toolCalls?.length > 0,
-  //     });
-
-  //     const intent = this.parseIntentResponse(response);
-
-  //     Logger.info("AIService: Intent analyzed", {
-  //       intent: intent.intent,
-  //       confidence: intent.confidence,
-  //       usedContext: intent.usedContext,
-  //       requiresClarification: intent.requiresClarification,
-  //       toolCount: intent.toolCalls?.length || 0,
-  //     });
-
-  //     return intent;
-  //   } catch (error) {
-  //     Logger.error("AIService: Error analyzing intent", error);
-  //     return {
-  //       intent: "general_chat",
-  //       confidence: 0.3,
-  //       entities: {},
-  //       requiresClarification: true,
-  //       clarificationMessage:
-  //         "I didn't quite understand. Could you rephrase that?",
-  //     };
-  //   }
-  // }
-
-  // =====================================
-  // METHOD 1: REPLACE buildSystemPrompt
-  // =====================================
-
-  //   buildSystemPrompt(context) {
-  //     const availableProjects = context.projects || [];
-  //     const currentProject = context.currentProject;
-  //     const currentProjectId = currentProject?.projectId;
-  //     const currentProjectName = currentProject?.projectName;
-  //     const hasContext = !!currentProjectId;
-  //     const currentTasksIndex = context?.currentTaskIndex || [];
-
-  //     return `You are a tool-calling assistant for a WhatsApp project management bot.
-
-  // YOUR ONLY JOB: Convert user messages into TOOL CALLS. Do NOT respond with text for project/task operations.
-
-  // =====================================
-  // USER CONTEXT
-  // =====================================
-  // Phone: ${context.phoneNumber || "Unknown"}
-
-  // 🔴 CURRENT PROJECT SET: ${hasContext ? "YES ✅" : "NO ❌"}
-  // ${
-  //   hasContext
-  //     ? `Current Project: "${currentProjectName}"
-  // Current Project ID: ${currentProjectId}
-  // ⚠️  USE THIS ID FOR ALL TASK TOOL CALLS`
-  //     : "No project context available"
-  // }
-
-  // 🔵 CURRENT TASK: ${currentTasksIndex ? `Task #${currentTasksIndex}` : "None selected"}
-
-  // =====================================
-  // 🚨 CRITICAL RULE
-  // =====================================
-
-  // When currentProject IS SET and user mentions tasks:
-  // 1. ALWAYS use the currentProjectId
-  // 2. If no task number mentioned → use currentTaskIndex = ${currentTasksIndex || "None"}
-  // 3. ALWAYS call a tool (list_project_tasks, get_task_details, update_task_status)
-  // 4. NEVER respond with text explanations
-  // 5. NEVER ask "which project?"
-
-  // ${
-  //   hasContext
-  //     ? `
-  // EXAMPLES YOU MUST FOLLOW:
-
-  // ✅ "Show all the task"
-  //    → list_project_tasks(phoneNumber, projectId="${currentProjectId}")
-
-  // ✅ "Show task 1"
-  //    → get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=1)
-
-  // ✅ "Mark task 2 done"
-  //    → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=2, status="completed")
-
-  // ✅ "Task 3 in progress"
-  //    → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=3, status="inProgress")
-
-  //    "Start it" "update the status to started" (no number, use currentTaskIndex=${currentTasksIndex})
-  //    → update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=${currentTasksIndex}, status="inProgress")
-  // `
-  //     : `
-  // No project context. For task requests:
-  // - Ask which project
-  // - OR use search_project_by_name
-  // `
-  // }
-
-  // =====================================
-  // INTENT DETECTION
-  // =====================================
-
-  // ${
-  //   hasContext
-  //     ? `
-  // Pattern 1: User wants ALL TASKS
-  //   Keywords: "show", "list", "what tasks", "all tasks", "the task"
-  //   Action: list_project_tasks(phoneNumber, projectId="${currentProjectId}")
-
-  // Pattern 2: User wants TASK DETAILS (with number)
-  //   Keywords: "task 1", "show task 2", "task 3 details"
-  //   Action: get_task_details(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>)
-
-  // Pattern 3: User wants TO UPDATE STATUS
-  //   Keywords: "mark done", "complete", "in progress", "start", "finish"
-  //   Action: update_task_status(phoneNumber, projectId="${currentProjectId}", taskIndex=<number>, status=<status>)
-  // `
-  //     : "Pattern matching requires project context"
-  // }
-
-  // =====================================
-  // RESPONSE FORMAT (CRITICAL)
-  // =====================================
-
-  // RESPOND WITH ONLY TOOL CALLS.
-  // NO TEXT BEFORE TOOL CALLS.
-
-  // ❌ WRONG: "Let me show all tasks..."
-  // ✅ CORRECT: [tool_use block only]
-
-  // If you respond with text when tools needed = YOU FAIL
-  // `;
-  //   }
+  
+  CONFIDENCE GUIDELINES:
+  - High (0.9-1.0): Clear intent, has all required parameters
+  - Medium (0.7-0.8): Intent clear but missing some details (project name, task index)
+  - Low (<0.7): Ambiguous - ask for clarification
+  
+  =====================================
+  EXAMPLE CONVERSIONS
+  =====================================
+  
+  User: "get all the task of improvement project karnataka"
+  → Intent: TASK_LIST_INTENT
+  → Action: list_project_tasks(phoneNumber, "improvement project karnataka")
+  → Confidence: 0.95
+  
+  User: "get first task of improvement project karnataka"
+  → Intent: TASK_DETAILS_INTENT
+  → Action: get_task_details(phoneNumber, "improvement project karnataka", 1)
+  → Confidence: 0.95
+  
+  User: "show task 3"
+  → Intent: TASK_DETAILS_INTENT (need clarification on project)
+  → Clarification: "Which project? Available: [list]"
+  → Confidence: 0.6
+  
+  User: "mark task 1 done"
+  → Intent: TASK_STATUS_UPDATE_INTENT (need clarification on project)
+  → Clarification: "Which project? Available: [list]"
+  → Confidence: 0.6
+  
+  User: "show project improvement project karnataka"
+  → Intent: SEARCH_PROJECT_INTENT
+  → Action: search_project_by_name(phoneNumber, "improvement project karnataka")
+  → Confidence: 0.9
+  
+  User: "list projects"
+  → Intent: PROJECT_INTENT_DETECTION
+  → Action: list_projects(phoneNumber)
+  → Confidence: 1.0`;
+  }
+  
 
   // =====================================
   // METHOD 2: ADD generateAutoToolCall (NEW METHOD)

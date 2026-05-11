@@ -529,11 +529,169 @@ router.post("/start_new_project", async (req, res) => {
 
 
 // UPDATE TASK STATUS ENDPOINT - REFACTORED
+// router.post("/update_task_status", async (req, res) => {
+//   try {
+//     const { phoneNumber, projectId, projectName, taskIndex, status } = req.body;
+
+//     Logger.info("MCP: Update Task Status", {
+//       phoneNumber,
+//       projectId,
+//       projectName,
+//       taskIndex,
+//       status,
+//     });
+
+//     // Step 1: Validate required parameters
+//     if (!phoneNumber || taskIndex === undefined) {
+//       return res.status(400).json({
+//         success: false,
+//         error:
+//           "Missing required parameters: phoneNumber, taskIndex (projectId or projectName)",
+//       });
+//     }
+
+//     if (!projectId && !projectName) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Either projectId or projectName is required",
+//       });
+//     }
+
+//     if (!status) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Status is required",
+//       });
+//     }
+
+//     // Step 2: Validate task status
+//     const paramValidation = await projectService.validateTaskParameters(
+//       phoneNumber,
+//       taskIndex,
+//       status
+//     );
+//     if (!paramValidation.success) {
+//       return res.status(400).json({
+//         success: false,
+//         error: paramValidation.error,
+//       });
+//     }
+
+//     // Step 3: Resolve project ID
+//     let finalProjectId = projectId;
+
+//     const isInvalidProjectId = 
+//   !projectId || 
+//   projectId === "none" || 
+//   projectId === "undefined" || 
+//   projectId === "null" || 
+//   projectId === "";
+
+//     // If projectName provided but not projectId, search for the project first
+//     if (isInvalidProjectId && projectName) {
+//       Logger.info("Searching for project by name first", {
+//         phoneNumber,
+//         projectName,
+//       });
+
+//       const searchResult = await projectService.searchProjectByName(
+//         phoneNumber,
+//         projectName,
+//         true
+//       );
+
+//       if (!searchResult.success || !searchResult.projectId) {
+//         return res.status(404).json({
+//           success: false,
+//           error: `Project "${projectName}" not found`,
+//           projectName,
+//         });
+//       }
+
+//       finalProjectId = searchResult.projectId;
+//     }
+
+//     // Step 4: Verify project exists (optional but recommended)
+//     const projectData = await Project.findOne(
+//       { projectId: finalProjectId, phoneNumber },
+//       { projectId: 1, projectName: 1, solutionId: 1 }
+//     ).lean();
+
+//     if (!projectData) {
+//       Logger.warn("Project not found in DB", {
+//         phoneNumber,
+//         projectId: finalProjectId,
+//       });
+
+//       // Optionally fetch from API and sync
+//       const apiProjectData = await projectService
+//         .fetchProjectFromAPI(finalProjectId)
+//         .catch((err) => {
+//           Logger.warn("Failed to fetch project from API", { err });
+//           return null;
+//         });
+
+//       if (!apiProjectData) {
+//         return res.status(404).json({
+//           success: false,
+//           error: "Project not found",
+//           projectId: finalProjectId,
+//         });
+//       }
+
+//       // Sync to DB in background
+//       await projectService
+//         .syncProjectToDB(apiProjectData, phoneNumber, 1)
+//         .catch((err) => {
+//           Logger.warn("Failed to sync project to DB", { err });
+//         });
+//     }
+
+//     // Step 5: Update context
+//     await usersQueries.updateLastMessage(phoneNumber, {
+//       flow: "project_tasks",
+//       step: 2,
+//       context: {
+//         projectId: finalProjectId,
+//         currentTaskIndex: taskIndex,
+//         status: status,
+//       },
+//       text: "update_task_status",
+//     });
+
+//     // Step 6: Call service to handle status update
+//     await taskService.handleStatusUpdate(
+//       phoneNumber,
+//       taskIndex,
+//       status,
+//       finalProjectId
+//     );
+
+//     res.json({
+//       success: true,
+//       action: "update_task_status",
+//       projectId: finalProjectId,
+//       taskIndex,
+//       status,
+//       phoneNumber,
+//     });
+//   } catch (error) {
+//     Logger.error("MCP: Update Task Status Error", error);
+//     res.status(500).json({
+//       success: false,
+//       error: error.message,
+//     });
+//   }
+// });
+
 router.post("/update_task_status", async (req, res) => {
+  const requestId = Date.now(); // For tracing
+  
   try {
     const { phoneNumber, projectId, projectName, taskIndex, status } = req.body;
 
-    Logger.info("MCP: Update Task Status", {
+    Logger.info("MCP: Update Task Status - START", {
+      requestId,
       phoneNumber,
       projectId,
       projectName,
@@ -541,48 +699,114 @@ router.post("/update_task_status", async (req, res) => {
       status,
     });
 
-    // Step 1: Validate required parameters
-    if (!phoneNumber || taskIndex === undefined) {
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 1: Validate required parameters
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    if (!phoneNumber) {
+      Logger.warn("Missing phoneNumber", { requestId });
       return res.status(400).json({
         success: false,
-        error:
-          "Missing required parameters: phoneNumber, taskIndex (projectId or projectName)",
+        error: "Missing required parameter: phoneNumber",
       });
     }
 
-    if (!projectId && !projectName) {
+    if (taskIndex === undefined || taskIndex === null) {
+      Logger.warn("Missing taskIndex", { requestId, phoneNumber });
       return res.status(400).json({
         success: false,
-        error: "Either projectId or projectName is required",
+        error: "Missing required parameter: taskIndex",
       });
     }
 
-    if (!status) {
+    if (!status || status === "") {
+      Logger.warn("Missing or empty status", { requestId, phoneNumber });
       return res.status(400).json({
         success: false,
-        error: "Status is required",
+        error: "Missing required parameter: status",
       });
     }
 
-    // Step 2: Validate task status
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 2: Validate project identifier
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // Check if projectId is valid
+    const isInvalidProjectId = 
+      !projectId || 
+      projectId === "none" || 
+      projectId === "undefined" || 
+      projectId === "null" || 
+      projectId === "";
+
+    // Check if projectName is valid
+    const isInvalidProjectName = 
+      !projectName || 
+      projectName === "none" || 
+      projectName === "" ||
+      projectName.trim() === "";
+
+    // We need either a valid projectId OR a valid projectName
+    if (isInvalidProjectId && isInvalidProjectName) {
+      Logger.warn("Neither valid projectId nor projectName provided", {
+        requestId,
+        phoneNumber,
+        projectId,
+        projectName,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "Either valid projectId or projectName is required",
+        details: {
+          received: {
+            projectId: projectId || null,
+            projectName: projectName || null,
+          },
+          expected: "projectId (string/number) OR projectName (string)",
+        },
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 3: Validate task status
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    Logger.info("Validating task parameters", {
+      requestId,
+      phoneNumber,
+      taskIndex,
+      status,
+    });
+
     const paramValidation = await projectService.validateTaskParameters(
       phoneNumber,
       taskIndex,
       status
     );
+
     if (!paramValidation.success) {
+      Logger.warn("Task parameter validation failed", {
+        requestId,
+        phoneNumber,
+        error: paramValidation.error,
+      });
       return res.status(400).json({
         success: false,
         error: paramValidation.error,
       });
     }
 
-    // Step 3: Resolve project ID
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 4: Resolve project ID
+    // ═══════════════════════════════════════════════════════════════════════
+    
     let finalProjectId = projectId;
+    let resolvedProjectName = projectName;
 
-    // If projectName provided but not projectId, search for the project first
-    if (!projectId && projectName) {
-      Logger.info("Searching for project by name first", {
+    // If projectId is invalid but projectName is provided, search for project
+    if (isInvalidProjectId && !isInvalidProjectName) {
+      Logger.info("Resolving projectId from projectName", {
+        requestId,
         phoneNumber,
         projectName,
       });
@@ -593,7 +817,13 @@ router.post("/update_task_status", async (req, res) => {
         true
       );
 
-      if (!searchResult.success || !searchResult.projectId) {
+      if (!searchResult || !searchResult.success || !searchResult.projectId) {
+        Logger.warn("Project search failed", {
+          requestId,
+          phoneNumber,
+          projectName,
+          searchResult,
+        });
         return res.status(404).json({
           success: false,
           error: `Project "${projectName}" not found`,
@@ -602,29 +832,63 @@ router.post("/update_task_status", async (req, res) => {
       }
 
       finalProjectId = searchResult.projectId;
+      resolvedProjectName = searchResult.projectName || projectName;
+
+      Logger.info("Project resolved from name", {
+        requestId,
+        phoneNumber,
+        projectName,
+        projectId: finalProjectId,
+      });
     }
 
-    // Step 4: Verify project exists (optional but recommended)
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 5: Verify project exists
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    Logger.info("Verifying project exists", {
+      requestId,
+      phoneNumber,
+      projectId: finalProjectId,
+    });
+
     const projectData = await Project.findOne(
       { projectId: finalProjectId, phoneNumber },
       { projectId: 1, projectName: 1, solutionId: 1 }
     ).lean();
 
     if (!projectData) {
-      Logger.warn("Project not found in DB", {
+      Logger.warn("Project not found in database", {
+        requestId,
         phoneNumber,
         projectId: finalProjectId,
       });
 
-      // Optionally fetch from API and sync
+      // Try to fetch from API and sync
+      Logger.info("Attempting to fetch project from API", {
+        requestId,
+        phoneNumber,
+        projectId: finalProjectId,
+      });
+
       const apiProjectData = await projectService
         .fetchProjectFromAPI(finalProjectId)
         .catch((err) => {
-          Logger.warn("Failed to fetch project from API", { err });
+          Logger.warn("Failed to fetch project from API", {
+            requestId,
+            phoneNumber,
+            projectId: finalProjectId,
+            error: err.message,
+          });
           return null;
         });
 
       if (!apiProjectData) {
+        Logger.error("Project verification failed - not found anywhere", {
+          requestId,
+          phoneNumber,
+          projectId: finalProjectId,
+        });
         return res.status(404).json({
           success: false,
           error: "Project not found",
@@ -633,46 +897,103 @@ router.post("/update_task_status", async (req, res) => {
       }
 
       // Sync to DB in background
+      Logger.info("Syncing project to database", {
+        requestId,
+        phoneNumber,
+        projectId: finalProjectId,
+      });
+
       await projectService
         .syncProjectToDB(apiProjectData, phoneNumber, 1)
         .catch((err) => {
-          Logger.warn("Failed to sync project to DB", { err });
+          Logger.warn("Failed to sync project to DB (non-critical)", {
+            requestId,
+            phoneNumber,
+            projectId: finalProjectId,
+            error: err.message,
+          });
         });
     }
 
-    // Step 5: Update context
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 6: Update user context
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    Logger.info("Updating user context", {
+      requestId,
+      phoneNumber,
+      projectId: finalProjectId,
+      taskIndex,
+      status,
+    });
+
     await usersQueries.updateLastMessage(phoneNumber, {
       flow: "project_tasks",
       step: 2,
       context: {
         projectId: finalProjectId,
+        projectName: resolvedProjectName,
         currentTaskIndex: taskIndex,
         status: status,
       },
       text: "update_task_status",
     });
 
-    // Step 6: Call service to handle status update
-    await taskService.handleStatusUpdate(
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 7: Execute task status update
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    Logger.info("Executing task status update", {
+      requestId,
+      phoneNumber,
+      projectId: finalProjectId,
+      taskIndex,
+      status,
+    });
+
+    const updateResult = await taskService.handleStatusUpdate(
       phoneNumber,
       taskIndex,
       status,
       finalProjectId
     );
 
-    res.json({
-      success: true,
-      action: "update_task_status",
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 8: Return success response
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    Logger.info("MCP: Update Task Status - SUCCESS", {
+      requestId,
+      phoneNumber,
       projectId: finalProjectId,
       taskIndex,
       status,
-      phoneNumber,
     });
+
+    res.json({
+      success: true,
+      action: "update_task_status",
+      data: {
+        projectId: finalProjectId,
+        projectName: resolvedProjectName,
+        taskIndex,
+        status,
+        phoneNumber,
+      },
+    });
+
   } catch (error) {
-    Logger.error("MCP: Update Task Status Error", error);
+    Logger.error("MCP: Update Task Status - ERROR", {
+      requestId: requestId || Date.now(),
+      phoneNumber: req.body?.phoneNumber,
+      error: error.message,
+      stack: error.stack,
+    });
+
     res.status(500).json({
       success: false,
-      error: error.message,
+      error: "Failed to update task status",
+      message: error.message,
     });
   }
 });

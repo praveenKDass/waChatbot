@@ -389,7 +389,13 @@ class TaskService {
         type: "quick_reply",
         title: "🏠 Back to Project",
         id: "back_to_project",
-      });
+      },
+      {
+        type: "quick_reply",
+        title: "🏠 Main Menu",
+        id: "main_menu",
+      },
+    );
 
       if (allTasksCompleted) {
         await whatsappService.sendMessage(

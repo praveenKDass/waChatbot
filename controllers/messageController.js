@@ -16,8 +16,17 @@ class MessageController {
    */
   static async handleWhatsAppMessage(message, phoneNumber) {
     try {
-
       const lastMessage = await usersQueries.getLastMessage(phoneNumber);
+
+
+      //message comes from a group or has group context - ignore for now
+      if (phoneNumber?.includes("@g.us") || message?.context?.group_id) {
+        Logger2.info("MessageController: Group message ignored", {
+          phoneNumber,
+          groupId: message?.context?.group_id,
+        });
+        return { handled: false, route: "ignored-group" };
+      }
 
       // ============================================
       // STEP 1: Interactive Messages (Buttons/Lists)
@@ -80,77 +89,74 @@ class MessageController {
           {
             phoneNumber,
             text: messageText.substring(0, 50),
-          }
+          },
         );
-        return await this.handleNaturalLanguage(
-          message,
-          phoneNumber,
-          messageText
-        );
+        // return await this.handleNaturalLanguage(
+        //   message,
+        //   phoneNumber,
+        //   messageText,
+        // );
       }
 
       // ============================================
       // STEP 4: Media (Evidence Upload)
       // ============================================
-      if (
-        (message.type === "image" || message.type === "document") &&
-        lastMessage?.context?.uploadingEvidence
-      ) {
-        Logger2.info("MessageController: Media → FlowRouter (Evidence)", {
-          phoneNumber,
-          type: message.type,
-        });
-        const result = await flowRouter.route(message);
-        return { ...result, route: "flowrouter-media" };
-      } else {
+      // if (
+      //   (message.type === "image" || message.type === "document") &&
+      //   lastMessage?.context?.uploadingEvidence
+      // ) {
+      //   Logger2.info("MessageController: Media → FlowRouter (Evidence)", {
+      //     phoneNumber,
+      //     type: message.type,
+      //   });
+      //   const result = await flowRouter.route(message);
+      //   return { ...result, route: "flowrouter-media" };
+      // } else {
+      //   // await whatsappService.sendMessage(
+      //   //   phoneNumber,
+      //   //   `📁 To upload this as evidence, please provide:\n\n` +
+      //   //     `Project Name: (e.g., "Q4 Project")\n` +
+      //   //     `Task Number: (e.g., "1")\n\n` +
+      //   //     `Send like: "Q4 Project task 1" or "project Q4 1"`
+      //   // );
 
-        // await whatsappService.sendMessage(
-        //   phoneNumber,
-        //   `📁 To upload this as evidence, please provide:\n\n` +
-        //     `Project Name: (e.g., "Q4 Project")\n` +
-        //     `Task Number: (e.g., "1")\n\n` +
-        //     `Send like: "Q4 Project task 1" or "project Q4 1"`
-        // );
+      //   await whatsappService.sendMessage(
+      //     phoneNumber,
+      //     `📎 *UPLOAD EVIDENCE*\n\n` +
+      //       `Please reply with your project and task details:\n\n` +
+      //       `*Format:*\n` +
+      //       `"[Project Name] task [Number]"\n\n` +
+      //       `*Examples:*\n` +
+      //       `✓ Q4 Project task 1\n` +
+      //       `✓ Regression Testing task 3\n` +
+      //       `✓ Q1 Sprint task 5\n\n` +
+      //       `📌 You can also reply:\n` +
+      //       `• "project Q4 task 1"\n` +
+      //       `• "Upload to Q4 1"`,
+      //   );
 
-        await whatsappService.sendMessage(
-          phoneNumber,
-          `📎 *UPLOAD EVIDENCE*\n\n` +
-            `Please reply with your project and task details:\n\n` +
-            `*Format:*\n` +
-            `"[Project Name] task [Number]"\n\n` +
-            `*Examples:*\n` +
-            `✓ Q4 Project task 1\n` +
-            `✓ Regression Testing task 3\n` +
-            `✓ Q1 Sprint task 5\n\n` +
-            `📌 You can also reply:\n` +
-            `• "project Q4 task 1"\n` +
-            `• "Upload to Q4 1"`
-        );
+      //   // Set context for next message
+      //   await usersQueries.updateLastMessage(phoneNumber, {
+      //     flow: "process_evidence_upload",
+      //     step: 0,
+      //     context: {
+      //       ...lastMessage?.context,
+      //       pendingMedia: {
+      //         type: message.type,
+      //         id: message[message.type]?.id,
+      //         link: message[message.type]?.link,
+      //       },
+      //     },
+      //     text: "awaiting_evidence_context",
+      //   });
 
-       
-  
-        // Set context for next message
-        await usersQueries.updateLastMessage(phoneNumber, {
-          flow: "process_evidence_upload",
-          step: 0,
-          context: {
-            ...lastMessage?.context,
-            pendingMedia: {
-              type: message.type,
-              id: message[message.type]?.id,
-              link: message[message.type]?.link,
-            },
-          },
-          text: "awaiting_evidence_context",
-        });
-  
-        return { handled: true, route: "evidence-ask-context" };
-      }
+      //   return { handled: true, route: "evidence-ask-context" };
+      // }
 
       // Fallback
       await whatsappService.sendMessage(
         phoneNumber,
-        "❌ Sorry, I can only handle text, voice, images, and interactive messages."
+        "❌ Sorry, I can only handle text, voice, images, and interactive messages.",
       );
       return { success: false, handled: true, route: "unsupported" };
     } catch (error) {
@@ -183,7 +189,7 @@ class MessageController {
 
   static isSimpleCommand(text) {
     return /^(projects|help|menu|cancel|exit|stop|quit|done|hi|hello)$/i.test(
-      text
+      text,
     );
   }
 
@@ -233,7 +239,7 @@ class MessageController {
       // Acknowledge to user
       await whatsappService.sendMessage(
         phoneNumber,
-        "🎤 Processing your voice message..."
+        "🎤 Processing your voice message...",
       );
 
       // Download audio
@@ -245,7 +251,7 @@ class MessageController {
         });
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Failed to download voice message. Please try again or type your message."
+          "❌ Failed to download voice message. Please try again or type your message.",
         );
         return { success: false, handled: true, route: "audio-failed" };
       }
@@ -253,7 +259,7 @@ class MessageController {
       // Transcribe
       const transcription = await aiService2.transcribeVoice(
         audioBuffer,
-        "audio/ogg"
+        "audio/ogg",
       );
 
       if (!transcription.success || !transcription.text) {
@@ -262,7 +268,7 @@ class MessageController {
         });
         await whatsappService.sendMessage(
           phoneNumber,
-          "❌ Could not understand your voice message. Please try again or type your message."
+          "❌ Could not understand your voice message. Please try again or type your message.",
         );
         return { success: false, handled: true, route: "transcription-failed" };
       }
@@ -277,20 +283,20 @@ class MessageController {
       // Show transcription
       await whatsappService.sendMessage(
         phoneNumber,
-        `📝 *You said:*\n"${transcribedText}"\n\n⏳ Processing...`
+        `📝 *You said:*\n"${transcribedText}"\n\n⏳ Processing...`,
       );
 
       // Process as natural language
       return await this.handleNaturalLanguage(
         message,
         phoneNumber,
-        transcribedText
+        transcribedText,
       );
     } catch (error) {
       Logger2.error("MessageController: Error processing audio", error);
       await whatsappService.sendMessage(
         phoneNumber,
-        "❌ Error processing voice message. Please try typing instead."
+        "❌ Error processing voice message. Please try typing instead.",
       );
       return { success: false, handled: true, route: "audio-error" };
     }
@@ -319,7 +325,7 @@ class MessageController {
       const intent = await aiService2.analyzeUserIntent(
         messageText,
         userContext,
-        []
+        [],
       );
 
       Logger2.info("MessageController: Intent analyzed by Claude", {
@@ -346,14 +352,14 @@ class MessageController {
               phoneNumber,
               potentialProjectName: toolCall.input.projectName,
               availableProjects: userContext.projects.map((p) => p.projectName),
-            }
+            },
           );
 
           // Check if the projectName matches any existing project
           const matchedProject = userContext.projects.find(
             (p) =>
               p.projectName.toLowerCase() ===
-              toolCall.input.projectName.toLowerCase()
+              toolCall.input.projectName.toLowerCase(),
           );
 
           if (!matchedProject) {
@@ -373,7 +379,7 @@ class MessageController {
               {
                 phoneNumber,
                 clarificationSent: true,
-              }
+              },
             );
 
             await whatsappService.sendMessage(phoneNumber, clarificationMsg);
@@ -394,7 +400,7 @@ class MessageController {
           const result = await aiService2.callMCPTool(
             toolCall.name,
             toolCall.input,
-            phoneNumber
+            phoneNumber,
           );
 
           Logger2.debug("MessageController: Tool executed", {
@@ -415,7 +421,7 @@ class MessageController {
           {
             phoneNumber,
             confidence: intent.confidence,
-          }
+          },
         );
 
         await whatsappService.sendMessage(phoneNumber, clarificationMsg);
@@ -439,7 +445,7 @@ class MessageController {
       Logger2.error("MessageController: NLP error", error);
       await whatsappService.sendMessage(
         phoneNumber,
-        "I encountered an error. Type 'menu' for options."
+        "I encountered an error. Type 'menu' for options.",
       );
       return { success: false, handled: true, route: "nlp-error" };
     }
@@ -455,7 +461,7 @@ class MessageController {
 
       const userProjects = await Project.find(
         { phoneNumber },
-        { projectId: 1, projectName: 1, tasks: 1, submissionStatus: 1 }
+        { projectId: 1, projectName: 1, tasks: 1, submissionStatus: 1 },
       ).lean();
 
       const currentProjectId = lastMessage?.context?.projectId;
@@ -519,7 +525,7 @@ class MessageController {
             Authorization: `Bearer ${config.whapi.token}`,
           },
           timeout: 15000,
-        }
+        },
       );
 
       const mediaUrl =
